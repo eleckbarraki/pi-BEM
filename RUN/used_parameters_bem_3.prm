@@ -11,10 +11,10 @@ end
 subsection BEMProblem<3>
   set Continuos gradient across edges = true
   set Kernel type                     = screened
-  set Mapping Q Degree                = 2
+  set Mapping Q Degree                = 1
   set Mapping Type                    = FE
   set Preconditioner                  = ILU
-  set Screened Kappa                  = 1.2
+  set Screened Kappa                  = 100
   set Solution method                 = Direct
   subsection Grid Refinement
     set Coarsening threshold = 0.03
@@ -27,7 +27,7 @@ subsection BEMProblem<3>
   end
   subsection Scalar Finite Element
     set Finite Element type  = FEQ
-    set Finite element order = 2
+    set Finite element order = 1
   end
   subsection Solver
     set Log frequency = 1
@@ -38,28 +38,28 @@ subsection BEMProblem<3>
   end
   subsection Vector Finite Element
     set Finite Element type  = FEQ
-    set Finite element order = 2
+    set Finite element order = 1
   end
 end
 subsection BoundaryConditions<3>
   set Output file name = result
   subsection Potential 2d
-    set Function constants  = kappa=1.2
+    set Function constants  = kappa=100
     set Function expression = exp( -kappa * (x + y) / sqrt(2) )
     set Variable names      = x,y,t
   end
   subsection Potential 3d
-    set Function constants  = kappa=1.2
+    set Function constants  = kappa=100
     set Function expression = exp( -kappa/sqrt(3) * (x + y + z) )
     set Variable names      = x,y,z,t
   end
   subsection Wind function 2d
-    set Function constants  = kappa=1.2
+    set Function constants  = kappa=100
     set Function expression = -kappa/sqrt(2) * exp(-kappa/sqrt(2)*(x + y)); -kappa/sqrt(2) * exp(-kappa/sqrt(2)*(x + y))
     set Variable names      = x,y,t
   end
   subsection Wind function 3d
-    set Function constants  = kappa=1.2
+    set Function constants  = kappa=100
     set Function expression = -kappa/sqrt(3) * exp(-kappa/sqrt(3)*(x + y + z)); -kappa/sqrt(3) * exp(-kappa/sqrt(3)*(x + y + z)); -kappa/sqrt(3) * exp(-kappa/sqrt(3)*(x + y + z))
     set Variable names      = x,y,z,t
   end
