@@ -373,6 +373,10 @@ public:
 
   std::string solution_method;
 
+  std::string kernel_type;
+
+  double screened_kappa;
+
   SolverControl solver_control;
 
   // TODO AMG preconditioner

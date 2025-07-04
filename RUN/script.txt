@@ -1,0 +1,5 @@
+cd ../build
+make -j2
+cd -
+cp ../build/bem_fma_3d* .
+mpirun -np 2 ./bem_fma_3d

@@ -9,6 +9,7 @@
 #include <memory>
 
 #include "../include/laplace_kernel.h"
+#include "../include/screened_kernel.h"
 #include "../include/singular_kernel_integral.h"
 #include "Teuchos_TimeMonitor.hpp"
 
@@ -475,6 +476,10 @@ BEMProblem<dim>::declare_parameters(ParameterHandler &prm)
                     "Direct",
                     Patterns::Selection("Direct|FMA"));
 
+  prm.declare_entry("Kernel type", "laplace", Patterns::Selection("laplace|screened"));
+
+  prm.declare_entry("Screened Kappa", "1.0", Patterns::Double());                    
+
   prm.enter_subsection("Quadrature rules");
   {
     prm.declare_entry("Quadrature type",
@@ -532,6 +537,9 @@ BEMProblem<dim>::parse_parameters(ParameterHandler &prm)
 
   solution_method = prm.get("Solution method");
 
+  kernel_type = prm.get("Kernel type");
+
+  screened_kappa = prm.get_double("Screened Kappa");
 
   prm.enter_subsection("Quadrature rules");
   {
@@ -887,7 +895,12 @@ BEMProblem<dim>::assemble_system()
                   for (unsigned int q = 0; q < n_q_points; ++q)
                     {
                       const Tensor<1, dim> R = q_points[q] - support_points[i];
-                      LaplaceKernel::kernels(R, D, s);
+                      if (kernel_type == "laplace")
+                        LaplaceKernel::kernels(R, D, s);
+                      else if (kernel_type == "screened")
+                        ScreenedKernel::kernels(R, D, s, screened_kappa);
+                      else
+                        AssertThrow(false, ExcMessage("Unknown kernel type: " + kernel_type));
                       // if(support_points[i][0]==0.25&&support_points[i][1]==0.25)
                       //   pcout<<"D "<<D<<" s "<<s<<" , ";
                       for (unsigned int j = 0; j < fe->dofs_per_cell; ++j)
@@ -1139,7 +1152,12 @@ BEMProblem<dim>::assemble_system()
                     {
                       const Tensor<1, dim> R =
                         singular_q_points[q] - support_points[i];
-                      LaplaceKernel::kernels(R, D, s);
+                      if (kernel_type == "laplace")
+                        LaplaceKernel::kernels(R, D, s);
+                      else if (kernel_type == "screened")
+                        ScreenedKernel::kernels(R, D, s, screened_kappa);
+                      else
+                        AssertThrow(false, ExcMessage("Unknown kernel type: " + kernel_type));
 
                       for (unsigned int j = 0; j < fe->dofs_per_cell; ++j)
                         {
@@ -1420,8 +1438,9 @@ BEMProblem<dim>::compute_hypersingular_free_coeffs()
               unique_tangents[k] /= unique_tangents[k].norm();
               // cout<<unique_tangents[k]<<endl;
             }
+            
+          // initialize geometric alpha = 2*pi then subtracts the angle between every couple of normals 
           double geom_alpha = 0.5;
-
           geom_alpha = 2 * numbers::PI;
           if (unique_ordered_normals.size() > 1)
             {
@@ -1432,13 +1451,15 @@ BEMProblem<dim>::compute_hypersingular_free_coeffs()
                 acos(unique_ordered_normals[unique_ordered_normals.size() - 1] *
                      unique_ordered_normals[0]);
             }
+          
+          // then geom_alpha is normalized to get a value between 0 and 1    
           geom_alpha /= 4 * numbers::PI;
           hyp_alpha(i) = geom_alpha;
 
           // just in case we need to check the code
-          // pcout<<i<<"->      geom_alpha: "<<geom_alpha<<"
-          // "<<geom_alpha-alpha(i)<<endl; if (fabs(geom_alpha-alpha(i)) > 1e-3)
-          //   pcout<<"HELP!"<<endl;
+          pcout<<i<<"->      geom_alpha: "<<geom_alpha<<"	geom_alpha-alpha(i): "<<geom_alpha-alpha(i)<<endl; 
+          // if (fabs(geom_alpha-alpha(i)) > 1e-3)
+          //   pcout<<"HELP! 	fabs(geom_alpha-alpha(i)) > 1e-3"<<endl;
 
 
           Tensor<2, dim> C_matrix;
@@ -1550,7 +1571,7 @@ BEMProblem<dim>::compute_hypersingular_free_coeffs()
 
   pcout << "Done computing vector b_i" << std::endl;
 
-  pcout << "done computing free cefficients for hypersingular BIE" << std::endl;
+  pcout << "done computing free coefficients for hypersingular BIE" << std::endl;
 }
 
 template <int dim>
@@ -2706,7 +2727,12 @@ BEMProblem<dim>::compute_gradients_hypersingular(
                   for (unsigned int q = 0; q < n_q_points; ++q)
                     {
                       const Tensor<1, dim> R = q_points[q] - support_points[i];
-                      LaplaceKernel::kernels(R, H, D, s);
+                      if (kernel_type == "laplace")
+                        LaplaceKernel::kernels(R, H, D, s);
+                      else if (kernel_type == "screened")
+                        ScreenedKernel::kernels(R, H, D, s, screened_kappa);
+                      else
+                        AssertThrow(false, ExcMessage("Unknown kernel type: " + kernel_type));
                       for (unsigned int j = 0; j < fe->dofs_per_cell; ++j)
                         {
                           integral += -phi_local(local_dof_indices[j]) *
