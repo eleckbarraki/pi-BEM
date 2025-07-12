@@ -178,7 +178,8 @@ public:
   /// use the Double Layer Operator (through the Neumann matrix) to determine
   /// it.
   void
-  compute_alpha();
+  compute_alpha(const double kappa);
+  //compute_alpha();
 
   /// This function assembles the full distributed matrices needed by the direct
   /// method. We compute both the Double Layer Operator (Neumann matrix) and

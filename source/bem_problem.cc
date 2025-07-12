@@ -1457,7 +1457,7 @@ BEMProblem<dim>::compute_hypersingular_free_coeffs()
           hyp_alpha(i) = geom_alpha;
 
           // just in case we need to check the code
-          pcout<<i<<"->      geom_alpha: "<<geom_alpha<<"	geom_alpha-alpha(i): "<<geom_alpha-alpha(i)<<endl; 
+          pcout<<i<<"->      geom_alpha: "<<geom_alpha<<"	alpha(i): "<<alpha(i)<<endl; 
           // if (fabs(geom_alpha-alpha(i)) > 1e-3)
           //   pcout<<"HELP! 	fabs(geom_alpha-alpha(i)) > 1e-3"<<endl;
 
@@ -1574,38 +1574,152 @@ BEMProblem<dim>::compute_hypersingular_free_coeffs()
   pcout << "done computing free coefficients for hypersingular BIE" << std::endl;
 }
 
+
+// modified compute_alpha for screened poisson
 template <int dim>
 void
-BEMProblem<dim>::compute_alpha()
+BEMProblem<dim>::compute_alpha(const double kappa)
 {
-  static TrilinosWrappers::MPI::Vector ones, zeros, dummy;
+  // original
+  static TrilinosWrappers::MPI::Vector ones, zeros, dum;
   if (ones.size() != dh.n_dofs())
     {
       ones.reinit(this_cpu_set, mpi_communicator);
       vector_shift(ones, -1.);
       zeros.reinit(this_cpu_set, mpi_communicator);
-      dummy.reinit(this_cpu_set, mpi_communicator);
+      dum.reinit(this_cpu_set, mpi_communicator);
     }
+  
+  // new
+  static TrilinosWrappers::MPI::Vector normal_derivative_coeff, tmp1, tmp2;
+  if (normal_derivative_coeff.size() != dh.n_dofs())
+    {
+      // reinit the vectors
+      normal_derivative_coeff.reinit(this_cpu_set, mpi_communicator);
+      tmp1.reinit(this_cpu_set, mpi_communicator);
+      tmp2.reinit(this_cpu_set, mpi_communicator);
+      
+//      // obtain global position of the DOFs
+//      std::vector<Point<dim>> support_points(dh.n_dofs());
+//      DoFTools::map_dofs_to_support_points<dim - 1, dim>(*mapping,
+//                                                     dh,
+//                                                     support_points);
+      
+      // preparazione loop sulle celle
+      cell_it cell = dh.begin_active(), endc = dh.end();
+      const unsigned int                   dofs_per_cell = fe->dofs_per_cell;
+      std::vector<types::global_dof_index> local_dof_indices(dofs_per_cell);
+      FEValues<dim - 1, dim>               fe_v(*mapping,
+                                  *fe,
+                                  *quadrature,
+                                  update_values | update_normal_vectors |
+                                    update_quadrature_points | update_JxW_values);
+      
+      // loop over cells
+      for (cell = dh.begin_active(); cell != endc; ++cell)
+        {
+          // fe values sulla cella
+          fe_v.reinit(cell);
+      
+          // prende gli indici globali dei dof locali nella cella cell
+          cell->get_dof_indices(local_dof_indices);     // updates local_dof_indices
+          
+          // loop su dof locali in cell
+          for (unsigned int j = 0; j < fe->dofs_per_cell; ++j)             
+            {
+              double tmp_coeff = 0;
+            
+              // per ogni componente 1 2 3
+              for (unsigned int d = 0; d < dim; ++d)
+                {
+                  // da suddiviso a originale
+                  types::global_dof_index dummy =
+                    sub_wise_to_original[local_dof_indices[j]];
+                  
+                  // da originale a suddiviso
+                  types::global_dof_index vec_index =
+                    vec_original_to_sub_wise
+                      [gradient_dh.n_dofs() / dim * d +
+                       dummy]; 
 
-
+                  // controllo consistenza
+                  Assert(
+                    vector_this_cpu_set.is_element(vec_index),
+                    ExcMessage(
+                      "vector cpu set and cpu set are inconsistent"));
+                  
+                  // questo è quello che vuoi fare: k * (1,1,1) * normale
+                  tmp_coeff += kappa * 1 * vector_normals_solution[vec_index];
+                }
+              
+              // put it in the right dof-component of the vector
+              normal_derivative_coeff(local_dof_indices[j]) = tmp_coeff; 
+            }  
+        }
+    }
+    
   if (solution_method == "Direct")
     {
-      neumann_matrix.vmult(alpha, ones);
+      // prodotto matrice vettore
+      neumann_matrix.vmult(tmp1, ones);
+      dirichlet_matrix.vmult(tmp2, normal_derivative_coeff);
+
+      // alpha = -tmp1 - tmp2
+      alpha.reinit(this_cpu_set, mpi_communicator);
+      alpha.equ(-1.0, tmp1);
+      alpha.add(1.0, tmp2);
+      
+      // original
+      // neumann_matrix.vmult(alpha, ones);
     }
   else
     {
       AssertThrow(dim == 3, ExcMessage("FMA only works in 3D"));
 
       fma.generate_multipole_expansions(ones, zeros);
-      fma.multipole_matr_vect_products(ones, zeros, alpha, dummy);
+      fma.multipole_matr_vect_products(ones, zeros, alpha, dum);
     }
 
   // alpha.print(pcout);
-  // for (unsigned int i=0; i<alpha.size(); ++i)
-  //    {
-  //    cout<<std::setprecision(20)<<alpha(i)<<endl;
-  //    }
+//  for (unsigned int i=0; i<alpha.size(); ++i)
+//    {
+//      pcout << i << "-> 	alpha(i): " << std::setprecision(10) << alpha(i) <<endl;
+//    }
 }
+
+//// original compute_alpha
+//template <int dim>
+//void
+//BEMProblem<dim>::compute_alpha()
+//{
+//  static TrilinosWrappers::MPI::Vector ones, zeros, dummy;
+//  if (ones.size() != dh.n_dofs())
+//    {
+//      ones.reinit(this_cpu_set, mpi_communicator);
+//      vector_shift(ones, -1.);
+//      zeros.reinit(this_cpu_set, mpi_communicator);
+//      dummy.reinit(this_cpu_set, mpi_communicator);
+//    }
+
+
+//  if (solution_method == "Direct")
+//    {
+//      neumann_matrix.vmult(alpha, ones);
+//    }
+//  else
+//    {
+//      AssertThrow(dim == 3, ExcMessage("FMA only works in 3D"));
+
+//      fma.generate_multipole_expansions(ones, zeros);
+//      fma.multipole_matr_vect_products(ones, zeros, alpha, dummy);
+//    }
+
+//   alpha.print(pcout);
+//   for (unsigned int i=0; i<alpha.size(); ++i)
+//      {
+//        cout<<std::setprecision(15)<<alpha(i) << "  (" << support_points[i] << ")  "<<endl;
+//      }
+//}
 
 template <int dim>
 void
@@ -1733,9 +1847,9 @@ BEMProblem<dim>::solve_system(TrilinosWrappers::MPI::Vector       &phi,
   alpha      = 0;
 
 
-  compute_alpha();
+  compute_alpha(screened_kappa);
   compute_hypersingular_free_coeffs();
-
+  // alpha = hyp_alpha;
   //   for (unsigned int i = 0; i < alpha.size(); i++)
   //      if (this_cpu_set.is_element(i))
   //         pcout<<std::setprecision(20)<<alpha(i)<<std::endl;
