@@ -81,8 +81,8 @@ subsection ComputationalDomain<3>
   set Use a spheroid                                                           = false
   set Use iges surfaces and curves                                             = false
   subsection Boundary Conditions ID Numbers
-    set Dirichlet boundary ids = 1,0,110,110
-    set Neumann boundary ids   = 110,110
+    set Dirichlet boundary ids = 1,0, 110,110
+    set Neumann boundary ids   = 
   end
 end
 subsection Driver<3>

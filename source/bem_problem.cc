@@ -1299,6 +1299,10 @@ BEMProblem<dim>::compute_hypersingular_free_coeffs()
   cell_it cell = dh.begin_active(), endc = dh.end();
   std::vector<types::global_dof_index> local_dof_indices(fe->dofs_per_cell);
 
+  std::vector<Point<dim>> support_points(dh.n_dofs());
+  DoFTools::map_dofs_to_support_points<dim - 1, dim>(*mapping,
+                                                     dh,
+                                                     support_points);
 
   for (types::global_dof_index i = 0; i < dh.n_dofs();
        ++i) // these must now be the locally owned dofs. the rest should stay
@@ -1457,7 +1461,7 @@ BEMProblem<dim>::compute_hypersingular_free_coeffs()
           hyp_alpha(i) = geom_alpha;
 
           // just in case we need to check the code
-          pcout<<i<<"->      geom_alpha: "<<geom_alpha<<"	alpha(i): "<<alpha(i)<<endl; 
+          pcout<< i << ":   sp: " << support_points[i] <<"->      geom_alpha: "<<geom_alpha<<"	alpha(i): "<<alpha(i)<<endl; 
           // if (fabs(geom_alpha-alpha(i)) > 1e-3)
           //   pcout<<"HELP! 	fabs(geom_alpha-alpha(i)) > 1e-3"<<endl;
 
@@ -1599,11 +1603,16 @@ BEMProblem<dim>::compute_alpha(const double kappa)
       tmp1.reinit(this_cpu_set, mpi_communicator);
       tmp2.reinit(this_cpu_set, mpi_communicator);
       
-//      // obtain global position of the DOFs
-//      std::vector<Point<dim>> support_points(dh.n_dofs());
-//      DoFTools::map_dofs_to_support_points<dim - 1, dim>(*mapping,
-//                                                     dh,
-//                                                     support_points);
+      // obtain global position of the DOFs
+      std::vector<Point<dim>> support_points(dh.n_dofs());
+      DoFTools::map_dofs_to_support_points<dim - 1, dim>(*mapping,
+                                                     dh,
+                                                     support_points);
+                                                     
+      std::vector<Point<dim>> vec_support_points(gradient_dh.n_dofs());
+      DoFTools::map_dofs_to_support_points<dim - 1, dim>(*mapping,
+                                                     gradient_dh,
+                                                     vec_support_points);                                               
       
       // preparazione loop sulle celle
       cell_it cell = dh.begin_active(), endc = dh.end();
@@ -1615,6 +1624,10 @@ BEMProblem<dim>::compute_alpha(const double kappa)
                                   update_values | update_normal_vectors |
                                     update_quadrature_points | update_JxW_values);
       
+      Tensor<1,dim> vector_of_kappa;
+      for (unsigned int cc = 0; cc < dim; ++cc)
+    	vector_of_kappa[cc] = kappa/std::sqrt(3);
+
       // loop over cells
       for (cell = dh.begin_active(); cell != endc; ++cell)
         {
@@ -1627,8 +1640,17 @@ BEMProblem<dim>::compute_alpha(const double kappa)
           // loop su dof locali in cell
           for (unsigned int j = 0; j < fe->dofs_per_cell; ++j)             
             {
-              double tmp_coeff = 0;
-            
+              // define the norm of the normal vector          
+              double normy        = 0;
+              
+              // print dof coordinates
+              std::cout << "i:  " << local_dof_indices[j] << "  sp:  " << support_points[local_dof_indices[j]];
+              
+              // define and initialize local_normal to zero (just to be sure)
+              Tensor<1,dim> local_normal;
+              for (unsigned int ii = 0; ii < dim; ++ii)
+    		local_normal[ii] = 0;
+               
               // per ogni componente 1 2 3
               for (unsigned int d = 0; d < dim; ++d)
                 {
@@ -1636,7 +1658,7 @@ BEMProblem<dim>::compute_alpha(const double kappa)
                   types::global_dof_index dummy =
                     sub_wise_to_original[local_dof_indices[j]];
                   
-                  // da originale a suddiviso
+                  // da originale a suddiviso (to obtain vec_index)
                   types::global_dof_index vec_index =
                     vec_original_to_sub_wise
                       [gradient_dh.n_dofs() / dim * d +
@@ -1648,12 +1670,20 @@ BEMProblem<dim>::compute_alpha(const double kappa)
                     ExcMessage(
                       "vector cpu set and cpu set are inconsistent"));
                   
-                  // questo è quello che vuoi fare: k * (1,1,1) * normale
-                  tmp_coeff += kappa * 1 * vector_normals_solution[vec_index];
+                  // costruisco la local_normal componente a componente
+                  normy += vector_normals_solution[vec_index] *
+                                 vector_normals_solution[vec_index];
+                  local_normal[d] = vector_normals_solution[vec_index] ;
                 }
               
-              // put it in the right dof-component of the vector
-              normal_derivative_coeff(local_dof_indices[j]) = tmp_coeff; 
+              // normalize the normal vector (just to be sure)
+              local_normal = local_normal / std::sqrt(normy);
+              
+              // compute the coefficient
+              normal_derivative_coeff(local_dof_indices[j]) = vector_of_kappa * local_normal;
+              
+              // print normal to the dof
+              std::cout << "	normal:  " << local_normal << endl; 
             }  
         }
     }
@@ -1667,7 +1697,7 @@ BEMProblem<dim>::compute_alpha(const double kappa)
       // alpha = -tmp1 - tmp2
       alpha.reinit(this_cpu_set, mpi_communicator);
       alpha.equ(-1.0, tmp1);
-      alpha.add(1.0, tmp2);
+      alpha.add(-1.0, tmp2);
       
       // original
       // neumann_matrix.vmult(alpha, ones);
