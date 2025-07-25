@@ -1584,7 +1584,7 @@ template <int dim>
 void
 BEMProblem<dim>::compute_alpha(const double kappa)
 {
-  // original
+  // original section, used in the end part
   static TrilinosWrappers::MPI::Vector ones, zeros, dum;
   if (ones.size() != dh.n_dofs())
     {
@@ -1594,16 +1594,21 @@ BEMProblem<dim>::compute_alpha(const double kappa)
       dum.reinit(this_cpu_set, mpi_communicator);
     }
   
-  // new
-  static TrilinosWrappers::MPI::Vector normal_derivative_coeff, tmp1, tmp2;
-  if (normal_derivative_coeff.size() != dh.n_dofs())
+  // new section: compute phi e d_n phi of the func exp( k/sqrt(3) * (x+y+z) )
+  
+  // define four things
+  static TrilinosWrappers::MPI::Vector function_coeff, normal_derivative_coeff, tmp1, tmp2;
+  
+  // check to see if they need to be initialized
+  if (function_coeff.size() != dh.n_dofs() || normal_derivative_coeff.size() != dh.n_dofs())
     {
       // reinit the vectors
+      function_coeff.reinit(this_cpu_set, mpi_communicator);
       normal_derivative_coeff.reinit(this_cpu_set, mpi_communicator);
       tmp1.reinit(this_cpu_set, mpi_communicator);
       tmp2.reinit(this_cpu_set, mpi_communicator);
       
-      // obtain global position of the DOFs
+      // obtain global position of the DOFs and vector dofhandler
       std::vector<Point<dim>> support_points(dh.n_dofs());
       DoFTools::map_dofs_to_support_points<dim - 1, dim>(*mapping,
                                                      dh,
@@ -1614,7 +1619,7 @@ BEMProblem<dim>::compute_alpha(const double kappa)
                                                      gradient_dh,
                                                      vec_support_points);                                               
       
-      // preparazione loop sulle celle
+      // prepare loops over cells
       cell_it cell = dh.begin_active(), endc = dh.end();
       const unsigned int                   dofs_per_cell = fe->dofs_per_cell;
       std::vector<types::global_dof_index> local_dof_indices(dofs_per_cell);
@@ -1623,18 +1628,30 @@ BEMProblem<dim>::compute_alpha(const double kappa)
                                   *quadrature,
                                   update_values | update_normal_vectors |
                                     update_quadrature_points | update_JxW_values);
-      
+                                    
+//      // no, done later in the cell loop: obtain the value of phi in each dof (TODO: va bene in MPI?)
+//      for (unsigned int bb = 0; bb < dh.n_dofs(); ++bb)
+//    	  {
+//    	    const Point<dim> &punto = support_points[bb];
+//          double sum = 0.0;
+//          for (unsigned int d = 0; d < dim; ++d)
+//            sum += punto[d];
+
+//          function_coeff[bb] = std::exp(- kappa/std::sqrt(3) * sum);
+//    	  }
+
+      // initialize and define the 1x3 vector with constant components k/sqrt(3)
       Tensor<1,dim> vector_of_kappa;
       for (unsigned int cc = 0; cc < dim; ++cc)
-    	vector_of_kappa[cc] = kappa/std::sqrt(3);
+    	  vector_of_kappa[cc] = kappa/std::sqrt(3);
 
       // loop over cells
       for (cell = dh.begin_active(); cell != endc; ++cell)
         {
-          // fe values sulla cella
+          // fe values on current cell
           fe_v.reinit(cell);
       
-          // prende gli indici globali dei dof locali nella cella cell
+          // takes global dof indices of the dof in the cell 
           cell->get_dof_indices(local_dof_indices);     // updates local_dof_indices
           
           // loop su dof locali in cell
@@ -1644,46 +1661,57 @@ BEMProblem<dim>::compute_alpha(const double kappa)
               double normy        = 0;
               
               // print dof coordinates
-              std::cout << "i:  " << local_dof_indices[j] << "  sp:  " << support_points[local_dof_indices[j]];
+              std::cout << "i:  " << local_dof_indices[j] << "  sp:  " << support_points[local_dof_indices[j]] << endl;
+              
+              // take the reference to the support_point to sum the components
+              const Point<dim> &punto = support_points[local_dof_indices[j]];
               
               // define and initialize local_normal to zero (just to be sure)
               Tensor<1,dim> local_normal;
               for (unsigned int ii = 0; ii < dim; ++ii)
-    		local_normal[ii] = 0;
+    		        local_normal[ii] = 0;
+              
+              // initialize the sum of the dof components to zero
+              double sum = 0.0;
                
-              // per ogni componente 1 2 3
+              // loop over the components of the dof
               for (unsigned int d = 0; d < dim; ++d)
                 {
-                  // da suddiviso a originale
+                  // from subdivided to original
                   types::global_dof_index dummy =
                     sub_wise_to_original[local_dof_indices[j]];
                   
-                  // da originale a suddiviso (to obtain vec_index)
+                  // from original to subdivided (to obtain vec_index)
                   types::global_dof_index vec_index =
                     vec_original_to_sub_wise
                       [gradient_dh.n_dofs() / dim * d +
                        dummy]; 
 
-                  // controllo consistenza
+                  // consistency check
                   Assert(
                     vector_this_cpu_set.is_element(vec_index),
                     ExcMessage(
                       "vector cpu set and cpu set are inconsistent"));
                   
-                  // costruisco la local_normal componente a componente
+                  // sum the components of the dof
+                  sum += punto[d];    
+                  
+                  // build local_normal component by component  
                   normy += vector_normals_solution[vec_index] *
                                  vector_normals_solution[vec_index];
-                  local_normal[d] = vector_normals_solution[vec_index] ;
+                  local_normal[d] = vector_normals_solution[vec_index];
                 }
               
               // normalize the normal vector (just to be sure)
               local_normal = local_normal / std::sqrt(normy);
               
-              // compute the coefficient
+              // compute the coefficients
+              function_coeff(local_dof_indices[j]) = std::exp(- kappa/std::sqrt(3) * sum);
               normal_derivative_coeff(local_dof_indices[j]) = vector_of_kappa * local_normal;
+              normal_derivative_coeff(local_dof_indices[j]) *= function_coeff(local_dof_indices[j]);
               
               // print normal to the dof
-              std::cout << "	normal:  " << local_normal << endl; 
+              // std::cout << "	normal:  " << local_normal << endl; 
             }  
         }
     }
@@ -1691,13 +1719,19 @@ BEMProblem<dim>::compute_alpha(const double kappa)
   if (solution_method == "Direct")
     {
       // prodotto matrice vettore
-      neumann_matrix.vmult(tmp1, ones);
+      neumann_matrix.vmult(tmp1, function_coeff);
       dirichlet_matrix.vmult(tmp2, normal_derivative_coeff);
 
-      // alpha = -tmp1 - tmp2
+      // alpha = (-tmp1 - tmp2)/exp_i       MANCA 1/EXP_I
       alpha.reinit(this_cpu_set, mpi_communicator);
       alpha.equ(-1.0, tmp1);
       alpha.add(-1.0, tmp2);
+
+      // divide for function_coeff component by component
+      for (unsigned int ii = 0; ii < alpha.size(); ++ii)
+        {
+          alpha[ii] /= function_coeff[ii];
+        }
       
       // original
       // neumann_matrix.vmult(alpha, ones);
@@ -1710,11 +1744,11 @@ BEMProblem<dim>::compute_alpha(const double kappa)
       fma.multipole_matr_vect_products(ones, zeros, alpha, dum);
     }
 
-  // alpha.print(pcout);
-//  for (unsigned int i=0; i<alpha.size(); ++i)
-//    {
-//      pcout << i << "-> 	alpha(i): " << std::setprecision(10) << alpha(i) <<endl;
-//    }
+// alpha.print(pcout);
+// for (unsigned int i=0; i<alpha.size(); ++i)
+//   {
+//     pcout << i << "-> 	alpha(i): " << std::setprecision(10) << alpha(i) <<endl;
+//   }
 }
 
 //// original compute_alpha
