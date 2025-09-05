@@ -14,7 +14,7 @@ subsection BEMProblem<3>
   set Mapping Q Degree                = 1
   set Mapping Type                    = FE
   set Preconditioner                  = ILU
-  set Screened Kappa                  = 12
+  set Screened Kappa                  = 4
   set Solution method                 = Direct
   subsection Grid Refinement
     set Coarsening threshold = 0.03
@@ -44,22 +44,22 @@ end
 subsection BoundaryConditions<3>
   set Output file name = result
   subsection Potential 2d
-    set Function constants  = kappa=12
+    set Function constants  = kappa=4
     set Function expression = exp( -kappa * (x + y) / sqrt(2) )
     set Variable names      = x,y,t
   end
   subsection Potential 3d
-    set Function constants  = kappa=12
+    set Function constants  = kappa=4
     set Function expression = exp( -kappa/sqrt(3) * (x + y + z) )
     set Variable names      = x,y,z,t
   end
   subsection Wind function 2d
-    set Function constants  = kappa=12
+    set Function constants  = kappa=4
     set Function expression = -kappa/sqrt(2) * exp(-kappa/sqrt(2)*(x + y)); -kappa/sqrt(2) * exp(-kappa/sqrt(2)*(x + y))
     set Variable names      = x,y,t
   end
   subsection Wind function 3d
-    set Function constants  = kappa=12
+    set Function constants  = kappa=4
     set Function expression = -kappa/sqrt(3) * exp(-kappa/sqrt(3)*(x + y + z)); -kappa/sqrt(3) * exp(-kappa/sqrt(3)*(x + y + z)); -kappa/sqrt(3) * exp(-kappa/sqrt(3)*(x + y + z))
     set Variable names      = x,y,z,t
   end
@@ -75,7 +75,7 @@ subsection ComputationalDomain<3>
   set Input path to CAD files                                                  = ./
   set Max aspect ratio                                                         = 3.5
   set Maximum number of curvature adaptive refinement cycles                   = 5
-  set Number of cycles                                                         = 2
+  set Number of cycles                                                         = 3
   set Number of global refinement to be executed before local refinement cycle = 0
   set Surface curvature adaptive refinement                                    = false
   set Use a spheroid                                                           = false

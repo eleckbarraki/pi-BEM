@@ -1299,10 +1299,6 @@ BEMProblem<dim>::compute_hypersingular_free_coeffs()
   cell_it cell = dh.begin_active(), endc = dh.end();
   std::vector<types::global_dof_index> local_dof_indices(fe->dofs_per_cell);
 
-  std::vector<Point<dim>> support_points(dh.n_dofs());
-  DoFTools::map_dofs_to_support_points<dim - 1, dim>(*mapping,
-                                                     dh,
-                                                     support_points);
 
   for (types::global_dof_index i = 0; i < dh.n_dofs();
        ++i) // these must now be the locally owned dofs. the rest should stay
@@ -1461,7 +1457,7 @@ BEMProblem<dim>::compute_hypersingular_free_coeffs()
           hyp_alpha(i) = geom_alpha;
 
           // just in case we need to check the code
-          pcout<< i << ":   sp: " << support_points[i] <<"->      geom_alpha: "<<geom_alpha<<"	alpha(i): "<<alpha(i)<<endl; 
+          pcout<<i<<"->      geom_alpha: "<<geom_alpha<<"	alpha(i): "<<alpha(i)<<endl; 
           // if (fabs(geom_alpha-alpha(i)) > 1e-3)
           //   pcout<<"HELP! 	fabs(geom_alpha-alpha(i)) > 1e-3"<<endl;
 
@@ -1579,12 +1575,47 @@ BEMProblem<dim>::compute_hypersingular_free_coeffs()
 }
 
 
-// modified compute_alpha for screened poisson
+// Compute the free coefficients for the Laplace problem
+template <int dim>
+void
+BEMProblem<dim>::compute_alpha()
+{
+  static TrilinosWrappers::MPI::Vector ones, zeros, dummy;
+  if (ones.size() != dh.n_dofs())
+    {
+      ones.reinit(this_cpu_set, mpi_communicator);
+      vector_shift(ones, -1.);
+      zeros.reinit(this_cpu_set, mpi_communicator);
+      dummy.reinit(this_cpu_set, mpi_communicator);
+    }
+
+
+  if (solution_method == "Direct")
+    {
+      neumann_matrix.vmult(alpha, ones);
+    }
+  else
+    {
+      AssertThrow(dim == 3, ExcMessage("FMA only works in 3D"));
+
+      fma.generate_multipole_expansions(ones, zeros);
+      fma.multipole_matr_vect_products(ones, zeros, alpha, dummy);
+    }
+
+//   alpha.print(pcout);
+//   for (unsigned int i=0; i<alpha.size(); ++i)
+//      {
+//        cout<<std::setprecision(15)<<alpha(i) << "  (" << support_points[i] << ")  "<<endl;
+//      }
+}
+
+
+// Compute the free coefficients for the Screened Poisson problem
 template <int dim>
 void
 BEMProblem<dim>::compute_alpha(const double kappa)
 {
-  // original section, used in the end part
+  // original section, used in the last part
   static TrilinosWrappers::MPI::Vector ones, zeros, dum;
   if (ones.size() != dh.n_dofs())
     {
@@ -1594,21 +1625,19 @@ BEMProblem<dim>::compute_alpha(const double kappa)
       dum.reinit(this_cpu_set, mpi_communicator);
     }
   
-  // new section: compute phi e d_n phi of the func exp( k/sqrt(3) * (x+y+z) )
+  // Define static variables for function values and normal derivative
+  static TrilinosWrappers::MPI::Vector function_coeff, normal_derivative_coeff; 
+  static TrilinosWrappers::MPI::Vector tmp1, tmp2;
   
-  // define four things
-  static TrilinosWrappers::MPI::Vector function_coeff, normal_derivative_coeff, tmp1, tmp2;
-  
-  // check to see if they need to be initialized
   if (function_coeff.size() != dh.n_dofs() || normal_derivative_coeff.size() != dh.n_dofs())
     {
-      // reinit the vectors
+      // Allocate vectors
       function_coeff.reinit(this_cpu_set, mpi_communicator);
       normal_derivative_coeff.reinit(this_cpu_set, mpi_communicator);
       tmp1.reinit(this_cpu_set, mpi_communicator);
       tmp2.reinit(this_cpu_set, mpi_communicator);
       
-      // obtain global position of the DOFs and vector dofhandler
+      // Support points of scalar and gradient DoFs
       std::vector<Point<dim>> support_points(dh.n_dofs());
       DoFTools::map_dofs_to_support_points<dim - 1, dim>(*mapping,
                                                      dh,
@@ -1619,7 +1648,7 @@ BEMProblem<dim>::compute_alpha(const double kappa)
                                                      gradient_dh,
                                                      vec_support_points);                                               
       
-      // prepare loops over cells
+      // Initialize FEValues for integration on each cell
       cell_it cell = dh.begin_active(), endc = dh.end();
       const unsigned int                   dofs_per_cell = fe->dofs_per_cell;
       std::vector<types::global_dof_index> local_dof_indices(dofs_per_cell);
@@ -1628,113 +1657,101 @@ BEMProblem<dim>::compute_alpha(const double kappa)
                                   *quadrature,
                                   update_values | update_normal_vectors |
                                     update_quadrature_points | update_JxW_values);
-                                    
-//      // no, done later in the cell loop: obtain the value of phi in each dof (TODO: va bene in MPI?)
-//      for (unsigned int bb = 0; bb < dh.n_dofs(); ++bb)
-//    	  {
-//    	    const Point<dim> &punto = support_points[bb];
-//          double sum = 0.0;
-//          for (unsigned int d = 0; d < dim; ++d)
-//            sum += punto[d];
 
-//          function_coeff[bb] = std::exp(- kappa/std::sqrt(3) * sum);
-//    	  }
-
-      // initialize and define the 1x3 vector with constant components k/sqrt(3)
-      Tensor<1,dim> vector_of_kappa;
+      // Define constant vector with components kappa/sqrt(3)
+	// todo: invee che 3 ci metto dim?
+      const double inv_sqrt3 = 1.0 / std::sqrt(3.0);
+      Tensor<1,dim> kappa_vector;
       for (unsigned int cc = 0; cc < dim; ++cc)
-    	  vector_of_kappa[cc] = kappa/std::sqrt(3);
+    	  kappa_vector[cc] = kappa * inv_sqrt3;
 
-      // loop over cells
+      // Loop over cells
       for (cell = dh.begin_active(); cell != endc; ++cell)
         {
-          // fe values on current cell
           fe_v.reinit(cell);
       
-          // takes global dof indices of the dof in the cell 
-          cell->get_dof_indices(local_dof_indices);     // updates local_dof_indices
+          // Retrieve DoF indices on this cell
+          cell->get_dof_indices(local_dof_indices);
           
-          // loop su dof locali in cell
+          // Loop over DoF indices on this cell
           for (unsigned int j = 0; j < fe->dofs_per_cell; ++j)             
-            {
-              // define the norm of the normal vector          
-              double normy        = 0;
-              
+            {              
               // print dof coordinates
-              std::cout << "i:  " << local_dof_indices[j] << "  sp:  " << support_points[local_dof_indices[j]] << endl;
+              // std::cout << "i:  " << local_dof_indices[j] << "  sp:  " << support_points[local_dof_indices[j]] << endl;
               
-              // take the reference to the support_point to sum the components
-              const Point<dim> &punto = support_points[local_dof_indices[j]];
-              
-              // define and initialize local_normal to zero (just to be sure)
+              // Normal vector (local_normal) and its norm (normy), initialized to zero
               Tensor<1,dim> local_normal;
               for (unsigned int ii = 0; ii < dim; ++ii)
     		        local_normal[ii] = 0;
+    	      double normy        = 0;	        
               
-              // initialize the sum of the dof components to zero
+              // Sum of coordinates (x+y+z)
               double sum = 0.0;
+              
+              // Take the reference to support_point to sum the components
+              const Point<dim> &punto = support_points[local_dof_indices[j]];
                
-              // loop over the components of the dof
+              // Loop over components of the current Dof
               for (unsigned int d = 0; d < dim; ++d)
                 {
-                  // from subdivided to original
+                  // Map indices between subdivided and original systems (to obtain vec_index)
                   types::global_dof_index dummy =
                     sub_wise_to_original[local_dof_indices[j]];
                   
-                  // from original to subdivided (to obtain vec_index)
                   types::global_dof_index vec_index =
                     vec_original_to_sub_wise
                       [gradient_dh.n_dofs() / dim * d +
                        dummy]; 
 
-                  // consistency check
+                  // Consistency check
                   Assert(
                     vector_this_cpu_set.is_element(vec_index),
                     ExcMessage(
                       "vector cpu set and cpu set are inconsistent"));
                   
-                  // sum the components of the dof
+                  // Sum the components of the DoF (x+y+z)
                   sum += punto[d];    
                   
-                  // build local_normal component by component  
+                  // Build local_normal component by component  
                   normy += vector_normals_solution[vec_index] *
                                  vector_normals_solution[vec_index];
                   local_normal[d] = vector_normals_solution[vec_index];
                 }
               
               // normalize the normal vector (just to be sure)
-              local_normal = local_normal / std::sqrt(normy);
+              // local_normal = local_normal; / std::sqrt(normy);
               
-              // compute the coefficients
-              function_coeff(local_dof_indices[j]) = std::exp(- kappa/std::sqrt(3) * sum);
-              normal_derivative_coeff(local_dof_indices[j]) = vector_of_kappa * local_normal;
-              normal_derivative_coeff(local_dof_indices[j]) *= function_coeff(local_dof_indices[j]);
+              // Function value: exp(-kappa/sqrt(3) * (x+y+z))
+              function_coeff(local_dof_indices[j]) = std::exp(- kappa * inv_sqrt3 * sum);
+              
+              // Normal derivative: -function * kappa_vector * normal vector
+              normal_derivative_coeff(local_dof_indices[j]) = kappa_vector * local_normal;
+              normal_derivative_coeff(local_dof_indices[j]) *= -function_coeff(local_dof_indices[j]);
               
               // print normal to the dof
               // std::cout << "	normal:  " << local_normal << endl; 
             }  
         }
     }
-    
+  
+  // Compute alpha depending on solver type  
   if (solution_method == "Direct")
     {
-      // prodotto matrice vettore
+      // Multiply coefficients and Newmann and Dirichlet matrices
       neumann_matrix.vmult(tmp1, function_coeff);
       dirichlet_matrix.vmult(tmp2, normal_derivative_coeff);
 
-      // alpha = (-tmp1 - tmp2)/exp_i       MANCA 1/EXP_I
+      // alpha = (-tmp1 - tmp2) / function_coeff
       alpha.reinit(this_cpu_set, mpi_communicator);
-      alpha.equ(-1.0, tmp1);
-      alpha.add(-1.0, tmp2);
-
-      // divide for function_coeff component by component
+      alpha  = tmp2;
+      alpha -= tmp1;
+      
       for (unsigned int ii = 0; ii < alpha.size(); ++ii)
-        {
-          alpha[ii] /= function_coeff[ii];
+        { 
+          if (this_cpu_set.is_element(ii))
+          	alpha[ii] /= function_coeff[ii];
         }
       
-      // original
-      // neumann_matrix.vmult(alpha, ones);
     }
   else
     {
@@ -1751,39 +1768,6 @@ BEMProblem<dim>::compute_alpha(const double kappa)
 //   }
 }
 
-//// original compute_alpha
-//template <int dim>
-//void
-//BEMProblem<dim>::compute_alpha()
-//{
-//  static TrilinosWrappers::MPI::Vector ones, zeros, dummy;
-//  if (ones.size() != dh.n_dofs())
-//    {
-//      ones.reinit(this_cpu_set, mpi_communicator);
-//      vector_shift(ones, -1.);
-//      zeros.reinit(this_cpu_set, mpi_communicator);
-//      dummy.reinit(this_cpu_set, mpi_communicator);
-//    }
-
-
-//  if (solution_method == "Direct")
-//    {
-//      neumann_matrix.vmult(alpha, ones);
-//    }
-//  else
-//    {
-//      AssertThrow(dim == 3, ExcMessage("FMA only works in 3D"));
-
-//      fma.generate_multipole_expansions(ones, zeros);
-//      fma.multipole_matr_vect_products(ones, zeros, alpha, dummy);
-//    }
-
-//   alpha.print(pcout);
-//   for (unsigned int i=0; i<alpha.size(); ++i)
-//      {
-//        cout<<std::setprecision(15)<<alpha(i) << "  (" << support_points[i] << ")  "<<endl;
-//      }
-//}
 
 template <int dim>
 void

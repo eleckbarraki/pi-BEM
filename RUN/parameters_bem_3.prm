@@ -21,7 +21,7 @@ subsection BEMProblem<3>
   set Preconditioner                  = ILU
   set Solution method                 = Direct
   set Kernel type                     = screened
-  set Screened Kappa                  = 12
+  set Screened Kappa                  = 4
 
   subsection Grid Refinement
     set Coarsening threshold = 0.03
@@ -70,7 +70,7 @@ subsection BoundaryConditions<3>
     # formula. (That said, for convenience this class actually defines both
     # `pi' and `Pi' by default, but you get the idea.)
     # set Function constants  =
-    set Function constants  = kappa=12
+    set Function constants  = kappa=4
 
     # The formula that denotes the function you want to evaluate for
     # particular values of the independent variables. This expression may
@@ -113,7 +113,7 @@ subsection BoundaryConditions<3>
     # formula. (That said, for convenience this class actually defines both
     # `pi' and `Pi' by default, but you get the idea.)
     # set Function constants  =
-    set Function constants  = kappa=12
+    set Function constants  = kappa=4
 
     # The formula that denotes the function you want to evaluate for
     # particular values of the independent variables. This expression may
@@ -156,7 +156,7 @@ subsection BoundaryConditions<3>
     # formula. (That said, for convenience this class actually defines both
     # `pi' and `Pi' by default, but you get the idea.)
     # set Function constants  = 
-    set Function constants  = kappa=12
+    set Function constants  = kappa=4
 
     # The formula that denotes the function you want to evaluate for
     # particular values of the independent variables. This expression may
@@ -199,7 +199,7 @@ subsection BoundaryConditions<3>
     # formula. (That said, for convenience this class actually defines both
     # `pi' and `Pi' by default, but you get the idea.)
     # set Function constants  = 
-    set Function constants  = kappa=12
+    set Function constants  = kappa=4
 
     # The formula that denotes the function you want to evaluate for
     # particular values of the independent variables. This expression may
@@ -245,7 +245,7 @@ subsection ComputationalDomain<3>
   set Input path to CAD files                                                  = ./
   set Max aspect ratio                                                         = 3.5
   set Maximum number of curvature adaptive refinement cycles                   = 5
-  set Number of cycles                                                         = 2
+  set Number of cycles                                                         = 3
   set Number of global refinement to be executed before local refinement cycle = 0
   set Surface curvature adaptive refinement                                    = false
   set Use a spheroid                                                           = false

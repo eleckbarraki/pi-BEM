@@ -178,8 +178,13 @@ public:
   /// use the Double Layer Operator (through the Neumann matrix) to determine
   /// it.
   void
+  compute_alpha();
+  
+  /// This function computes the free coefficients for the Screened Poisson 
+  /// problem. The computation involves evaluating exp(-kappa/sqrt(3) * (x+y+z))
+  /// and its normal derivative on the degrees of freedom.
+  void
   compute_alpha(const double kappa);
-  //compute_alpha();
 
   /// This function assembles the full distributed matrices needed by the direct
   /// method. We compute both the Double Layer Operator (Neumann matrix) and
