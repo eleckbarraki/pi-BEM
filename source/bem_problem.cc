@@ -467,17 +467,43 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
           // here we make the conversion: I am not sure this is the best way to do it
           double r = sqrt(cart*cart);
           double theta = acos(cart(2)/r);
+          
+          // phi mola
           double sgn_y;
           if (cart(1)>0)
              sgn_y = 1.0;
           else
              sgn_y = -1.0;
           double phi = sgn_y*acos(cart(0)/sqrt(cart(0)*cart(0)+cart(1)*cart(1)));
+
+//          // phi mio, è la stessa cosa!
+//          double phi = std::atan2(cart(1), cart(0));
+          
           spher(0)=r; spher(1)=theta;
           if (dim==3)
              spher(2)=phi;
           spher_local_supp_points[j] = spher;
           }
+          
+      //1.1) fix the jump acros -pi and pi for phi
+      
+      // todo: maybe can do it in previous loop?
+      if (dim==3)
+        {
+        double phi_ref = spher_local_supp_points[0](2);   // as a ferefence we take phi of first dof
+
+        for (unsigned int j=0; j<fe->dofs_per_cell; ++j)
+          {
+          double &phi = spher_local_supp_points[j](2);
+          double diff = phi - phi_ref;
+
+          if (diff > numbers::PI)
+              phi -= 2.0 * numbers::PI;
+          else if (diff < -numbers::PI)
+              phi += 2.0 * numbers::PI;
+          }
+        }     
+          
       // we now print the spherical coordinates computed
       std::cout<<cell<<"  Supp Spher:  "<<std::endl;
       for (unsigned int j=0; j<fe->dofs_per_cell; ++j)
