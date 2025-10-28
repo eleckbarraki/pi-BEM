@@ -417,6 +417,154 @@ BEMProblem<dim>::reinit()
     b_i[i].reinit(this_cpu_set, mpi_communicator);
 }
 
+// to detect if z axis is on corner, on edge or on center of a cell and rotate a cell eventually
+namespace
+{
+  // distance from z-axis
+  inline double radial_distance(const Point<3> &P)
+  {
+    return std::sqrt(P[0]*P[0] + P[1]*P[1]);
+  }
+
+  // z axis on node
+  bool z_axis_on_node(const DoFHandler<2, 3>::active_cell_iterator &cell,
+                      const double tol = 1e-12)
+  {
+    for (unsigned int v=0; v<GeometryInfo<2>::vertices_per_cell; ++v)
+    {
+      const Point<3> &P = cell->vertex(v);
+      if (radial_distance(P) < tol)
+        return true;
+    }    
+    return false;
+  }
+
+  // z axis on edge
+  bool z_axis_on_edge(const DoFHandler<2, 3>::active_cell_iterator &cell,
+                      const double tol = 1e-12)
+  {
+    for (unsigned int e = 0; e < GeometryInfo<2>::lines_per_cell; ++e)
+    {
+      const Point<3> &AA = cell->line(e)->vertex(0);
+      const Point<3> &BB = cell->line(e)->vertex(1);
+
+      double dx = BB[0] - AA[0];
+      double dy = BB[1] - AA[1];
+
+      double tx = (std::abs(dx) > tol) ? -AA[0] / dx : std::numeric_limits<double>::quiet_NaN();
+      double ty = (std::abs(dy) > tol) ? -AA[1] / dy : std::numeric_limits<double>::quiet_NaN();
+
+      // edges lying on x=0 or y=0 planes
+      if (std::abs(AA[0]) <= tol && std::abs(BB[0]) <= tol && AA[1] * BB[1] < 0)
+        return true;
+      if (std::abs(AA[1]) <= tol && std::abs(BB[1]) <= tol && AA[0] * BB[0] < 0)
+        return true;
+      
+      // edges not on x=0 or y=0 planes       
+      if (std::isfinite(tx) && std::isfinite(ty) &&
+              tx >= 0.0 && tx <= 1.0 && ty >= 0.0 && ty <= 1.0 &&
+              std::abs(tx - ty) < 1e-6)
+      {
+        // check that neither endpoint is on the z axis (node case)
+        if (radial_distance(AA) > tol && radial_distance(BB) > tol)
+          return true;
+      }
+    }
+    return false;
+  }
+
+  // z axis passes through the interior of the cell
+  bool z_axis_on_center(const DoFHandler<2, 3>::active_cell_iterator &cell,
+                             const double tol = 1e-12)
+  {
+    // check if origin (0,0) is inside cell
+    bool inside = false;
+    
+    for (unsigned int e = 0; e < GeometryInfo<2>::lines_per_cell; ++e)
+    {
+      const Point<3> &AA = cell->line(e)->vertex(0);
+      const Point<3> &BB = cell->line(e)->vertex(1);
+      
+      // perturb almost horizontal edges
+      double yA = (std::abs(AA[1]) < tol) ? std::copysign(tol, AA[1]) : AA[1];
+      double yB = (std::abs(BB[1]) < tol) ? std::copysign(tol, BB[1]) : BB[1];
+      
+      // skip horizontal edges
+      if (std::abs(yB - yA) < tol)
+        continue;
+      
+      bool intersect = ((yB > 0) != (yA > 0)) && (0 < (BB[0] - AA[0]) * (0 - yA) / (yB - yA) + AA[0]);
+      if (intersect)
+        inside = !inside;
+    }
+
+    return inside;
+  }
+  
+  // rotate the cell
+  template <int dim>
+  void rotate_cell(const std::vector<Point<dim>> &support_points_local, 
+                    std::vector<Point<dim>> &rotated_points)
+  {
+    const unsigned int n = support_points_local.size();
+    if (rotated_points.size() != n)
+      rotated_points.resize(n);
+    
+    // compute middle point of the cell  
+    Point<dim> P;
+    for (unsigned int i = 0; i < n; ++i)
+      P += support_points_local[i];
+    P /= n;
+
+    // compute the new x-axis direction: u = -(P - O)/|P - O| 
+    const double norm_P = P.norm();
+    if (norm_P < 1e-14)
+      throw std::runtime_error("Cell midpoint at origin: undefined rotation direction.");
+    Tensor<1,dim> u = -P / norm_P; // new x-axis (unit)
+
+    // choose a vector not parallel to u
+    Tensor<1,dim> a;
+    a[0] = 0; a[1] = 1; a[2] = 0;   // original y
+    Tensor<1,dim> cross_au = cross_product_3d(a,u);
+    if (cross_au.norm() < 1e-8)
+    {
+      a[0] = 0; a[1] = 0; a[2] = 1;   // if u is nearly parallel to y, use z
+    }
+
+    // compute orthonormal basis (u,v,w)
+    Tensor<1,dim> v = cross_product_3d(a,u);
+    v /= v.norm(); // new y-axis
+    Tensor<1,dim> w = cross_product_3d(u,v); // new z-axis (already unit)
+
+    // build rotation matrix E = [u v w]
+    Tensor<2,dim> E;
+    for (unsigned int i=0; i < dim; ++i)
+    {
+      E[i][0] = u[i];
+      E[i][1] = v[i];
+      E[i][2] = w[i];
+    }
+
+    // rotate cell dofs
+    for (unsigned int i=0; i < n; ++i)
+    {
+      const Point<dim> &X = support_points_local[i];
+      Point<dim> Xnew;
+      for (unsigned int k=0; k<dim; ++k)
+      {
+        Xnew[k] = 0.0;
+        for (unsigned int j=0; j<dim; ++j)
+          Xnew[k] += E[j][k] * X[j];
+      }
+
+      // store into support_points
+      rotated_points[i] = Xnew; 
+    }
+    return;
+  }
+}
+
+
 template <int dim>
 double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
 {
@@ -441,157 +589,207 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
   cell_it cell = dh.begin_active(), endc = dh.end();
 
   for (cell = dh.begin_active(); cell != endc; ++cell)
-    {
-      // this is just as usual, we reinitialize fe_v and local_dof_indices on this cell
-      fe_v.reinit(cell);
-      cell->get_dof_indices(local_dof_indices);
-
-      //const std::vector<Point<dim>> &q_points    = fe_v.get_quadrature_points();
-      //const std::vector<Tensor<1, dim>> &normals = fe_v.get_normal_vectors();
-      
-      // this is just to check that the first 4 dofs correspond to the vertices
-      for (unsigned int j=0; j<GeometryInfo<dim - 1>::vertices_per_cell; ++j)
-          {
-          std::cout<<cell<<"  Vert "<<j<<"  "<<cell->vertex(j)<<std::endl;
-          }
-      
-      //1) we obtain the spherical coordinates of all the cell dofs and the cell vertices
-      std::cout<<cell<<"  Supp Cart:  "<<std::endl;
-      std::vector<Point<dim> > spher_local_supp_points(fe->dofs_per_cell);
-      for (unsigned int j=0; j<fe->dofs_per_cell; ++j)
-          {
-          Point<dim> spher;
-          Point<dim> cart = support_points[local_dof_indices[j]];
-          // here we also print the cartesian coordinates of the dofs support points
-          std::cout<<cart<<std::endl;
-          // here we make the conversion: I am not sure this is the best way to do it
-          double r = sqrt(cart*cart);
-          double theta = acos(cart(2)/r);
-          
-          // phi mola
-          double sgn_y;
-          if (cart(1)>0)
-             sgn_y = 1.0;
-          else
-             sgn_y = -1.0;
-          double phi = sgn_y*acos(cart(0)/sqrt(cart(0)*cart(0)+cart(1)*cart(1)));
-
-//          // phi mio, è la stessa cosa!
-//          double phi = std::atan2(cart(1), cart(0));
-          
-          spher(0)=r; spher(1)=theta;
-          if (dim==3)
-             spher(2)=phi;
-          spher_local_supp_points[j] = spher;
-          }
-          
-      //1.1) fix the jump acros -pi and pi for phi
-      
-      // todo: maybe can do it in previous loop?
-      if (dim==3)
-        {
-        double phi_ref = spher_local_supp_points[0](2);   // as a ferefence we take phi of first dof
-
-        for (unsigned int j=0; j<fe->dofs_per_cell; ++j)
-          {
-          double &phi = spher_local_supp_points[j](2);
-          double diff = phi - phi_ref;
-
-          if (diff > numbers::PI)
-              phi -= 2.0 * numbers::PI;
-          else if (diff < -numbers::PI)
-              phi += 2.0 * numbers::PI;
-          }
-        }     
-          
-      // we now print the spherical coordinates computed
-      std::cout<<cell<<"  Supp Spher:  "<<std::endl;
-      for (unsigned int j=0; j<fe->dofs_per_cell; ++j)
-          {
-          std::cout<<spher_local_supp_points[j]<<std::endl;
-          }
-      
-      //2) create a one cell triangulation with the one cell and cell vertices spherical coordinates
-      std::vector<Point<dim>>        spher_vertices;
-      std::vector<CellData<dim - 1>> spher_cells;
-      SubCellData                    spher_subcelldata;
+  {
+    // this is just as usual, we reinitialize fe_v and local_dof_indices on this cell
+    fe_v.reinit(cell);
+    cell->get_dof_indices(local_dof_indices);
     
-      spher_vertices.resize(4);
-      spher_cells.resize(1);
-      for (unsigned int j=0; j<GeometryInfo<dim - 1>::vertices_per_cell; ++j)
-          spher_vertices[j] = spher_local_supp_points[j];
-      spher_cells[0].vertices[0]  = 0;
-      spher_cells[0].vertices[1]  = 1;
-      spher_cells[0].vertices[2]  = 2;
-      spher_cells[0].vertices[3]  = 3;
-      Triangulation<dim - 1, dim> spher_tria;
-      GridTools::delete_unused_vertices(spher_vertices, spher_cells, spher_subcelldata);
-      GridTools::consistently_order_cells(spher_cells);
-      spher_tria.create_triangulation(spher_vertices, spher_cells, spher_subcelldata);
-
+    //const std::vector<Point<dim>> &q_points    = fe_v.get_quadrature_points();
+    //const std::vector<Tensor<1, dim>> &normals = fe_v.get_normal_vectors();
       
-      //3) create a dh and a gradient_dh on the new one cell tria    
-      DoFHandler<dim - 1, dim>  spher_dh(spher_tria);
-      DoFHandler<dim - 1, dim>  spher_gradient_dh(spher_tria);
-      spher_dh.distribute_dofs(*fe);
-      spher_gradient_dh.distribute_dofs(*gradient_fe);
-      DoFRenumbering::component_wise(spher_dh);
-      DoFRenumbering::component_wise(spher_gradient_dh);
+    // this is just to check that the first 4 dofs correspond to the vertices
+    for (unsigned int j=0; j<GeometryInfo<dim - 1>::vertices_per_cell; ++j)
+    {
+      std::cout<<cell<<"  Vert "<<j<<"  "<<cell->vertex(j)<<std::endl;
+    }
       
-      
-      //4) prepare the vector with the local --- polar --- coordinates
-      //   for the one cell mapping on the new tria/dh
-      Vector<double>  spher_map_vector(spher_gradient_dh.n_dofs());
-      std::shared_ptr<Mapping<dim - 1, dim>> spher_mapping;          
-      if (mapping_type == "FE")
-        spher_mapping = std::make_shared<MappingFEField<dim - 1, dim>>(spher_gradient_dh,
-                                                                 spher_map_vector);
-      else
-        spher_mapping = std::make_shared<MappingQ<dim - 1, dim>>(mapping_degree);
-        
+    //1) we obtain the spherical coordinates of all the cell dofs and the cell vertices
+    std::cout<<cell<<"  Supp Cart:  "<<std::endl;
+    std::vector<Point<dim> > spher_local_supp_points(fe->dofs_per_cell);
+    
+    if (dim==2)
+    {
       for (unsigned int j=0; j<fe->dofs_per_cell; ++j)
-          {
-          spher_map_vector(j+0*fe->dofs_per_cell) = spher_local_supp_points[j](0);
-          spher_map_vector(j+1*fe->dofs_per_cell) = spher_local_supp_points[j](1);
-          spher_map_vector(j+2*fe->dofs_per_cell) = spher_local_supp_points[j](2);
-          } 
+      {
+        Point<dim> spher;
+        Point<dim> cart = support_points[local_dof_indices[j]];
+        // here we print the cartesian coordinates of the dofs support points
+        std::cout<<cart<<std::endl;
+        // here we make the conversion
+        double r = sqrt(cart*cart);
+        double theta = acos(cart(2)/r);
+        spher(0)=r; spher(1)=theta;
+        spher_local_supp_points[j] = spher;
+      }
+    }
+    
+    if (dim==3)
+    {      
+      // define local support points to act only on one cell
+      std::vector<Point<dim>> local_support_points(fe->dofs_per_cell);
+      for (unsigned int i = 0; i < fe->dofs_per_cell; ++i)
+        local_support_points[i] = support_points[ local_dof_indices[i] ];
+      std::vector<Point<dim>> points_to_use(fe->dofs_per_cell);
+      
+      // check which situation we are in
+      bool on_node = z_axis_on_node(cell);
+      bool on_edge = z_axis_on_edge(cell);
+      bool on_center = z_axis_on_center(cell);
+     
+      if (on_node)
+      {
+        std::cout << "z axis passes through a node of this cell \n";
+        points_to_use = local_support_points;
+      }
+      else if (on_edge)
+      {
+        // TODO: non funziona, restituisce NAN ma almeno modifica solo le celle che deve modificare      
+        std::cout << "z axis passes along an edge of this cell, rotate cell \n";
+        points_to_use.resize(fe->dofs_per_cell);
+        rotate_cell<dim>(local_support_points, points_to_use);
+      }
+      else if (on_center)
+      {
+        std::cout << "z axis passes through the center of this cell \n";
+        points_to_use = local_support_points;
+      }
+      else
+      {
+        std::cout << "z axis does not intersect this cell \n";
+        points_to_use = local_support_points;
+      }
+    
+      for (unsigned int j=0; j<fe->dofs_per_cell; ++j)
+      {
+        Point<dim> spher;
+        Point<dim> cart = points_to_use[j];
+        
+        // here we print the (eventually rotated) coordinates of the dofs support points
+        std::cout<<cart<<std::endl;
+        
+        // here we make the conversion
+        double r = sqrt(cart*cart);
+        double theta = acos(cart(2)/r);
+            
+        // phi mola
+        double sgn_y;
+        if (cart(1)>0)
+          sgn_y = 1.0;
+        else
+          sgn_y = -1.0;
+        double phi = sgn_y*acos(cart(0)/sqrt(cart(0)*cart(0)+cart(1)*cart(1)));
 
-      //5) create and FEValues on the new dh
-      FEValues<dim - 1, dim> spher_fe_v(*spher_mapping,
+  //    // phi mio, è la stessa cosa!
+  //    double phi = std::atan2(cart(1), cart(0));
+            
+        spher(0)=r; spher(1)=theta;
+        if (dim==3)
+          spher(2)=phi;
+        spher_local_supp_points[j] = spher;
+      }
+    
+      //1.1) fix the jump acros -pi and pi for phi   
+      // mio codice (1.14 e 0.50)
+      double phi_ref = spher_local_supp_points[0](2);   // as a reference we take phi of first dof
+
+      for (unsigned int j=0; j<fe->dofs_per_cell; ++j)
+      {
+        double &phi = spher_local_supp_points[j](2);
+        double diff = phi - phi_ref;
+
+        if (diff > numbers::PI)
+          phi -= 2.0 * numbers::PI;
+        else if (diff < -numbers::PI)
+          phi += 2.0 * numbers::PI; 
+      }
+    }
+          
+    // we now print the spherical coordinates computed
+    std::cout<<cell<<"  Supp Spher:  "<<std::endl;
+    for (unsigned int j=0; j<fe->dofs_per_cell; ++j)
+    {
+      std::cout<<spher_local_supp_points[j]<<std::endl;
+    }
+      
+    //2) create a one cell triangulation with the one cell and cell vertices spherical coordinates
+    std::vector<Point<dim>>        spher_vertices;
+    std::vector<CellData<dim - 1>> spher_cells;
+    SubCellData                    spher_subcelldata;
+    
+    spher_vertices.resize(4);
+    spher_cells.resize(1);
+    for (unsigned int j=0; j<GeometryInfo<dim - 1>::vertices_per_cell; ++j)
+      spher_vertices[j] = spher_local_supp_points[j];
+    spher_cells[0].vertices[0]  = 0;
+    spher_cells[0].vertices[1]  = 1;
+    spher_cells[0].vertices[2]  = 2;
+    spher_cells[0].vertices[3]  = 3;
+    Triangulation<dim - 1, dim> spher_tria;
+    GridTools::delete_unused_vertices(spher_vertices, spher_cells, spher_subcelldata);
+    GridTools::consistently_order_cells(spher_cells);
+    spher_tria.create_triangulation(spher_vertices, spher_cells, spher_subcelldata);
+      
+    //3) create a dh and a gradient_dh on the new one cell tria    
+    DoFHandler<dim - 1, dim>  spher_dh(spher_tria);
+    DoFHandler<dim - 1, dim>  spher_gradient_dh(spher_tria);
+    spher_dh.distribute_dofs(*fe);
+    spher_gradient_dh.distribute_dofs(*gradient_fe);
+    DoFRenumbering::component_wise(spher_dh);
+    DoFRenumbering::component_wise(spher_gradient_dh);
+       
+    //4) prepare the vector with the local --- polar --- coordinates
+    //   for the one cell mapping on the new tria/dh
+    Vector<double>  spher_map_vector(spher_gradient_dh.n_dofs());
+    std::shared_ptr<Mapping<dim - 1, dim>> spher_mapping;          
+    if (mapping_type == "FE")
+      spher_mapping = std::make_shared<MappingFEField<dim - 1, dim>>(spher_gradient_dh,
+                                                                 spher_map_vector);
+    else
+      spher_mapping = std::make_shared<MappingQ<dim - 1, dim>>(mapping_degree);
+        
+    for (unsigned int j=0; j<fe->dofs_per_cell; ++j)
+    {
+      spher_map_vector(j+0*fe->dofs_per_cell) = spher_local_supp_points[j](0);
+      spher_map_vector(j+1*fe->dofs_per_cell) = spher_local_supp_points[j](1);
+      spher_map_vector(j+2*fe->dofs_per_cell) = spher_local_supp_points[j](2);
+    } 
+
+    //5) create and FEValues on the new dh
+    FEValues<dim - 1, dim> spher_fe_v(*spher_mapping,
                                         *fe,
                                         *quadrature,
                                         update_values | update_normal_vectors |
                                         update_quadrature_points | update_JxW_values);
       
       
-      //6) loop on quadrature nodes to compute cell area both in standard way and with polar coordinates                                  
-      cell_it spher_cell = spher_dh.begin_active(); 
-      spher_fe_v.reinit(spher_cell);
-      const std::vector<Point<dim>> &spher_q_points    = spher_fe_v.get_quadrature_points();
-      double spher_cell_area = 0.0; 
-      for (unsigned int q = 0; q < n_q_points; ++q)
-            {
-            double r = spher_q_points[q](0);
-            double theta = spher_q_points[q](1);
-            spher_cell_area += r*r*sin(theta)*spher_fe_v.JxW(q);
-            }
-      std::cout<<"Spher area: "<<spher_cell_area<<std::endl;
+    //6) loop on quadrature nodes to compute cell area both in standard way and with polar coordinates                                  
+    cell_it spher_cell = spher_dh.begin_active(); 
+    spher_fe_v.reinit(spher_cell);
+    const std::vector<Point<dim>> &spher_q_points    = spher_fe_v.get_quadrature_points();
+    double spher_cell_area = 0.0; 
+    for (unsigned int q = 0; q < n_q_points; ++q)
+    {
+      double r = spher_q_points[q](0);
+      double theta = spher_q_points[q](1);
+      spher_cell_area += r*r*sin(theta)*spher_fe_v.JxW(q);
+    }
+    std::cout<<"Spher area: "<<spher_cell_area<<std::endl;
       
-      double cell_area = 0.0; 
-      for (unsigned int q = 0; q < n_q_points; ++q)
-            {
-            cell_area += fe_v.JxW(q);
-            }
-      std::cout<<"Area: "<<cell_area<<std::endl;
+    double cell_area = 0.0; 
+    for (unsigned int q = 0; q < n_q_points; ++q)
+    {
+      cell_area += fe_v.JxW(q);
+    }
+    std::cout<<"Area: "<<cell_area<<std::endl;
         
       
-      //1) obtain the spherical coordinates of all the cell dofs and the cell vertices
-      //2) create a local triangulation with the one cell and cell vertices spherical coordinates
-      //3) create a dh on the new local tria
-      //4) use the local dofs coordinate for the local mapping on the new tria/dh
-      //5) create and FEValues on the new dh
-      
-    }
+    //1) obtain the spherical coordinates of all the cell dofs and the cell vertices
+    //2) create a local triangulation with the one cell and cell vertices spherical coordinates
+    //3) create a dh on the new local tria
+    //4) use the local dofs coordinate for the local mapping on the new tria/dh
+    //5) create and FEValues on the new dh
+     
+  }
 
 return area;
 }

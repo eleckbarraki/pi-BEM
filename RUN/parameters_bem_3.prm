@@ -231,7 +231,7 @@ subsection ComputationalDomain<3>
   set Cad tolerance to projectors tolerance ratio                              = 100
   set Cells per circle                                                         = 12
   set Input grid format                                                        = inp
-  set Input grid name                                                          = ../grids/coarse_sphere
+  set Input grid name                                                          = ../grids/coarse_sphere_double_nodes_rotated
   set Input path to CAD files                                                  = ./
   set Max aspect ratio                                                         = 3.5
   set Maximum number of curvature adaptive refinement cycles                   = 5

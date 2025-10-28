@@ -259,6 +259,7 @@ ComputationalDomain<dim>::read_domain()
 
   if (input_grid_name == "../grids/coarse_sphere" ||
       input_grid_name == "../grids/coarse_sphere_double_nodes" ||
+      input_grid_name == "../grids/coarse_sphere_double_nodes_rotated" ||
       input_grid_name == "../grids/circle")
     {
       manifold = new SphericalManifold<dim - 1, dim>;
