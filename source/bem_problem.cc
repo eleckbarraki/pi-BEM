@@ -651,7 +651,8 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
       else if (on_center)
       {
         std::cout << "z axis passes through the center of this cell \n";
-        points_to_use = local_support_points;
+        points_to_use.resize(fe->dofs_per_cell);
+        rotate_cell<dim>(local_support_points, points_to_use);
       }
       else
       {
@@ -671,16 +672,16 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
         double r = sqrt(cart*cart);
         double theta = acos(cart(2)/r);
             
-        // phi mola
-        double sgn_y;
-        if (cart(1)>0)
-          sgn_y = 1.0;
-        else
-          sgn_y = -1.0;
-        double phi = sgn_y*acos(cart(0)/sqrt(cart(0)*cart(0)+cart(1)*cart(1)));
+//        // phi mola
+//        double sgn_y;
+//        if (cart(1)>0)
+//          sgn_y = 1.0;
+//        else
+//          sgn_y = -1.0;
+//        double phi = sgn_y*acos(cart(0)/sqrt(cart(0)*cart(0)+cart(1)*cart(1)));
 
-  //    // phi mio, è la stessa cosa!
-  //    double phi = std::atan2(cart(1), cart(0));
+        // phi mio, è la stessa cosa!
+        double phi = std::atan2(cart(1), cart(0));
             
         spher(0)=r; spher(1)=theta;
         if (dim==3)
@@ -689,8 +690,7 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
       }
     
       //1.1) fix the jump acros -pi and pi for phi   
-      // mio codice (1.14 e 0.50)
-      double phi_ref = spher_local_supp_points[0](2);   // as a reference we take phi of first dof
+      double phi_ref = spher_local_supp_points[8](2);   // as a reference we take phi of middle dof
 
       for (unsigned int j=0; j<fe->dofs_per_cell; ++j)
       {
