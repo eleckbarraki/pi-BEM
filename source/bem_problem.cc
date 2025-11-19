@@ -663,13 +663,14 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
       for (unsigned int j=0; j<fe->dofs_per_cell; ++j)
       {
         Point<dim> spher;
-        Point<dim> cart = points_to_use[j];
-        
+        Point<dim> singularity(0.0,0.0,0.0);
+        Point<dim> cart = points_to_use[j]-singularity;
+
         // here we print the (eventually rotated) coordinates of the dofs support points
         std::cout<<cart<<std::endl;
         
         // here we make the conversion
-        double r = sqrt(cart*cart);
+        double r = cart.norm();
         double theta = acos(cart(2)/r);
             
 //        // phi mola
