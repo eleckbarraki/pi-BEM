@@ -664,7 +664,7 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
       {
         Point<dim> spher;
         Point<dim> singularity(0.0,0.0,0.0);
-        Point<dim> cart = points_to_use[j]-singularity;
+        Point<dim> cart(points_to_use[j]-singularity);
 
         // here we print the (eventually rotated) coordinates of the dofs support points
         std::cout<<cart<<std::endl;
@@ -691,7 +691,7 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
       }
     
       //1.1) fix the jump acros -pi and pi for phi   
-      double phi_ref = spher_local_supp_points[8](2);   // as a reference we take phi of middle dof
+      double phi_ref = spher_local_supp_points[0](2);   // as a reference we take phi of first dof
 
       for (unsigned int j=0; j<fe->dofs_per_cell; ++j)
       {
@@ -1626,7 +1626,7 @@ template <int dim>
 void
 BEMProblem<dim>::compute_hypersingular_free_coeffs()
 {
-  pcout << "Computing free cefficients for hypersingular BIE" << std::endl;
+  pcout << "Computing free coefficients for hypersingular BIE" << std::endl;
 
   pcout << "Computing C_ij tensor" << endl;
 
