@@ -16,7 +16,7 @@ end
 
 subsection BEMProblem<3>
   set Continuos gradient across edges = true
-  set Mapping Q Degree                = 2
+  set Mapping Q Degree                = 1
   set Mapping Type                    = FE
   set Preconditioner                  = ILU
   set Solution method                 = Direct
@@ -34,7 +34,7 @@ subsection BEMProblem<3>
 
   subsection Scalar Finite Element
     set Finite Element type  = FEQ
-    set Finite element order = 2
+    set Finite element order = 1
   end
 
   subsection Solver
@@ -47,7 +47,7 @@ subsection BEMProblem<3>
 
   subsection Vector Finite Element
     set Finite Element type  = FEQ
-    set Finite element order = 2
+    set Finite element order = 1
   end
 
 end
