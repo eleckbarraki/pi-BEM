@@ -417,90 +417,9 @@ BEMProblem<dim>::reinit()
     b_i[i].reinit(this_cpu_set, mpi_communicator);
 }
 
-// to detect if z axis is on corner, on edge or on center of a cell and rotate a cell eventually
+// rotate a cell and check validity of triangles
 namespace
 {
-//  // distance from z-axis
-//  inline double radial_distance(const Point<3> &P)
-//  {
-//    return std::sqrt(P[0]*P[0] + P[1]*P[1]);
-//  }
-
-//  // z axis on node
-//  bool z_axis_on_node(const DoFHandler<2, 3>::active_cell_iterator &cell,
-//                      const double tol = 1e-12)
-//  {
-//    for (unsigned int v=0; v<GeometryInfo<2>::vertices_per_cell; ++v)
-//    {
-//      const Point<3> &P = cell->vertex(v);
-//      if (radial_distance(P) < tol)
-//        return true;
-//    }    
-//    return false;
-//  }
-
-//  // z axis on edge
-//  bool z_axis_on_edge(const DoFHandler<2, 3>::active_cell_iterator &cell,
-//                      const double tol = 1e-12)
-//  {
-//    for (unsigned int e = 0; e < GeometryInfo<2>::lines_per_cell; ++e)
-//    {
-//      const Point<3> &AA = cell->line(e)->vertex(0);
-//      const Point<3> &BB = cell->line(e)->vertex(1);
-
-//      double dx = BB[0] - AA[0];
-//      double dy = BB[1] - AA[1];
-
-//      double tx = (std::abs(dx) > tol) ? -AA[0] / dx : std::numeric_limits<double>::quiet_NaN();
-//      double ty = (std::abs(dy) > tol) ? -AA[1] / dy : std::numeric_limits<double>::quiet_NaN();
-
-//      // edges lying on x=0 or y=0 planes
-//      if (std::abs(AA[0]) <= tol && std::abs(BB[0]) <= tol && AA[1] * BB[1] < 0)
-//        return true;
-//      if (std::abs(AA[1]) <= tol && std::abs(BB[1]) <= tol && AA[0] * BB[0] < 0)
-//        return true;
-//      
-//      // edges not on x=0 or y=0 planes       
-//      if (std::isfinite(tx) && std::isfinite(ty) &&
-//              tx >= 0.0 && tx <= 1.0 && ty >= 0.0 && ty <= 1.0 &&
-//              std::abs(tx - ty) < 1e-6)
-//      {
-//        // check that neither endpoint is on the z axis (node case)
-//        if (radial_distance(AA) > tol && radial_distance(BB) > tol)
-//          return true;
-//      }
-//    }
-//    return false;
-//  }
-
-//  // z axis passes through the interior of the cell
-//  bool z_axis_on_center(const DoFHandler<2, 3>::active_cell_iterator &cell,
-//                             const double tol = 1e-12)
-//  {
-//    // check if origin (0,0) is inside cell
-//    bool inside = false;
-//    
-//    for (unsigned int e = 0; e < GeometryInfo<2>::lines_per_cell; ++e)
-//    {
-//      const Point<3> &AA = cell->line(e)->vertex(0);
-//      const Point<3> &BB = cell->line(e)->vertex(1);
-//      
-//      // perturb almost horizontal edges
-//      double yA = (std::abs(AA[1]) < tol) ? std::copysign(tol, AA[1]) : AA[1];
-//      double yB = (std::abs(BB[1]) < tol) ? std::copysign(tol, BB[1]) : BB[1];
-//      
-//      // skip horizontal edges
-//      if (std::abs(yB - yA) < tol)
-//        continue;
-//      
-//      bool intersect = ((yB > 0) != (yA > 0)) && (0 < (BB[0] - AA[0]) * (0 - yA) / (yB - yA) + AA[0]);
-//      if (intersect)
-//        inside = !inside;
-//    }
-
-//    return inside;
-//  }
-  
   // rotate the cell
   template <int dim>
   void rotate_cell(const typename DoFHandler<dim-1, dim>::active_cell_iterator &cell, 
@@ -572,7 +491,6 @@ namespace
     }
     rotated_singularity = Snew;
   
-    
     return;
   }
   
@@ -670,7 +588,7 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
     }
     
     bool sing_on_cell = false;
-    //TODO: dove lo metto questo per essere pi precisa?
+
     using Triangle = std::array<Point<dim>,3>;
     std::vector<Triangle> subtriangles_cart(4);
     
@@ -807,15 +725,64 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
           std::cout<<"subcell nr. " << i << " is invalid, skip it "<<std::endl;
           continue;
         }
+        // rotate valid triangle
+        const Point<dim> &A = subtriangles[i][1];
+        const Point<dim> &B = subtriangles[i][2];
+        Tensor<1,dim> ex = A / A.norm(); // new x-axis
+        
+        // compute orthonormal basis (ex,ey,ez)
+        Tensor<1,dim> ez = cross_product_3d(ex,B);
+        ez /= ez.norm(); // new z-axis
+        Tensor<1,dim> ey = cross_product_3d(ez, ex); // new y-axis
+
+        // build rotation matrix E = [ex ey ez]
+        Tensor<2,dim> E;
+        for (unsigned int ii=0; ii < dim; ++ii)
+        {
+          E[0][ii] = ex[ii];
+          E[1][ii] = ey[ii];
+          E[2][ii] = ez[ii];
+        }
+        
+        // rotate subtriangle vertices 1 and 2
+        for (unsigned int jj=1; jj < subtriangles[i].size(); ++jj)
+        {
+          const Point<dim> &X = subtriangles[i][jj];
+          Point<dim> Xnew;
+          for (unsigned int kk=0; kk<dim; ++kk)
+          {
+            Xnew[kk] = 0.0;
+            for (unsigned int tt=0; tt<dim; ++tt)
+              Xnew[kk] += E[kk][tt] * X[tt];
+          }
+          subtriangles[i][jj] = Xnew; 
+        }
+        
         // modify first point of subcell to (0, thetaA, phiA)
         subtriangles[i][0](1) = subtriangles[i][1](1);
         subtriangles[i][0](2) = subtriangles[i][1](2);
         
-        //add a point to valid triangles  
-        //TODO: il punto P non va bene, understand what to put here, SAPB? how to define P?
+        //add a point to valid triangles (S, A, B)  
+        //TODO: how to define P? in the subcell (singularity, A, B, P) it should be P(r=0, theta = thetaB, phi = phiB)?
         std::cout<<"creating quadrilateral subcell nr. "<< i <<std::endl;
-        Point<dim> P(subtriangles[i][1](0), subtriangles[i][2](1), subtriangles[i][2](2));
-        subcells.push_back(SubCell{{subtriangles[i][0], subtriangles[i][1], subtriangles[i][2], P}});
+        Point<dim> P(subtriangles[i][0](0), subtriangles[i][2](1), subtriangles[i][2](2));
+        subcells.push_back(SubCell{{subtriangles[i][0], subtriangles[i][1], subtriangles[i][2], P}});   //TODO here there is a problem
+        
+        // printing subcells vertices
+        // TODO: subcells are not created correctly??
+        std::cout<<"Subcell nr. "<< i <<std::endl;
+        
+        std::cout<<"what they should be: "<<std::endl;
+        std::cout<< subtriangles[i][0] << std::endl;
+        std::cout<< subtriangles[i][1] << std::endl;
+        std::cout<< subtriangles[i][2] << std::endl;
+        std::cout<< P << std::endl; // maybe P should be before the last because of deal.ii numbering?
+        
+        std::cout<<"what they are in reality (?): " <<std::endl;
+        for (unsigned int jj=0; jj < subcells[i].size(); ++jj)
+        {
+          std::cout<<subcells[i][jj]<<std::endl;
+        }
         
       }// end loop triangles
     }//end if(sing_on_cell)
@@ -830,7 +797,6 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
     for(unsigned int c = 0; c<subcells.size(); ++c)
     {  
       //2) create a one cell triangulation with the one cell and cell vertices spherical coordinates
-      //TODO: modify to get points for vertices from subcells, loop on subcells
       std::vector<Point<dim>>        spher_vertices;
       std::vector<CellData<dim - 1>> spher_cells;
       SubCellData                    spher_subcelldata;
@@ -889,18 +855,17 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
       
       // double spher_cell_area = 0.0;
       double spher_subcell_area = 0.0; 
-      std::cout<<"Quadrature points: "<<std::endl;
+      //std::cout<<"Quadrature points: "<<std::endl;
       for (unsigned int q = 0; q < n_q_points; ++q)
       {
         double r = spher_q_points[q](0);
         double theta = spher_q_points[q](1);
         spher_subcell_area += r*r*sin(theta)*spher_fe_v.JxW(q);
-        std::cout<<spher_q_points[q]<<std::endl;
+        //std::cout<<spher_q_points[q]<<std::endl;
       }
       spher_cell_area += spher_subcell_area;   
     } //end loop subcells
     
-    // TODO: DA INIZIALIZZARE, COME GLI DO SPHER_SUBCELL AREA?
     std::cout<<"Spher area: "<<spher_cell_area<<std::endl;
     
     double cell_area = 0.0; 
