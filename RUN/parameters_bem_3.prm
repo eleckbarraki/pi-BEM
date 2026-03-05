@@ -27,9 +27,9 @@ subsection BEMProblem<3>
   end
 
   subsection Quadrature rules
-    set Quadrature order          = 10
+    set Quadrature order          = 4
     set Quadrature type           = gauss
-    set Singular quadrature order = 11
+    set Singular quadrature order = 5
   end
 
   subsection Scalar Finite Element
@@ -235,7 +235,7 @@ subsection ComputationalDomain<3>
   set Input path to CAD files                                                  = ./
   set Max aspect ratio                                                         = 3.5
   set Maximum number of curvature adaptive refinement cycles                   = 5
-  set Number of cycles                                                         = 1
+  set Number of cycles                                                         = 3
   set Number of global refinement to be executed before local refinement cycle = 0
   set Surface curvature adaptive refinement                                    = false
   set Use a spheroid                                                           = false
