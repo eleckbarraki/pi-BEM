@@ -828,11 +828,23 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
       spher_vertices.resize(4);
       spher_cells.resize(1);
       
-      if(sing_on_cell)
+      if(sing_on_cell)//(true)
       {
-        spher_vertices[0] = subcells[c][0]; 
-        spher_vertices[1] = subcells[c][1]; 
-        spher_vertices[2] = subcells[c][3]; 
+//        Point<dim> serv;
+//        serv(1) = numbers::PI / 2;
+//        serv(0) = 0.5;
+//        serv(2) = numbers::PI / 2;
+//        spher_vertices[0] = serv;//subcells[c][0];
+//        serv(2) = numbers::PI / 4;  
+//        spher_vertices[1] = serv; //subcells[c][1];
+//        serv(0) = 1.0;
+//        spher_vertices[2] = serv; //subcells[c][3];
+//        serv(2) = numbers::PI / 2; 
+//        spher_vertices[3] = serv; //subcells[c][2];
+
+        spher_vertices[0] = subcells[c][0];
+        spher_vertices[1] = subcells[c][1];
+        spher_vertices[2] = subcells[c][3];
         spher_vertices[3] = subcells[c][2];
         
         spher_cells[0].vertices[0]  = 0;
@@ -874,13 +886,13 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
       else
         spher_mapping = std::make_shared<MappingQ<dim - 1, dim>>(mapping_degree);
           
-      if(sing_on_cell)
+      if(sing_on_cell) //(true)
       {
         const std::vector<unsigned int> ref_to_subcell = {0, 1, 3, 2};
         
         for (unsigned int j=0; j<fe->dofs_per_cell; ++j)    //TODO: now works only for linear fe
         {
-          const Point<dim> &p = subcells[c][ref_to_subcell[j]];
+          const Point<dim> &p = subcells[c][ref_to_subcell[j]];//spher_vertices[ref_to_subcell[j]];
           
           spher_map_vector(j+0*fe->dofs_per_cell) = p(0);
           spher_map_vector(j+1*fe->dofs_per_cell) = p(1);
@@ -912,53 +924,79 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
       const std::vector<Point<dim>> &spher_q_points = spher_fe_v.get_quadrature_points();
       
       // compute subcell area
-      double spher_subcell_area = 0.0; 
+      double spher_subcell_area = 0.0;
+      double fake_subcell_area = 0.0; 
       for (unsigned int q = 0; q < n_q_points; ++q)
       {
         double r = spher_q_points[q](0);
         double theta = spher_q_points[q](1);
+        double phi = spher_q_points[q](2);
+        
+        Tensor<2,dim> Js;
+        Js[0][0] = sin(theta) * cos(phi); Js[0][1] = r * cos(theta) * cos(phi); Js[0][2] = -r * sin(theta) * sin(phi);  
+        Js[1][0] = sin(theta) * sin(phi); Js[1][1] = r * cos(theta) * sin(phi); Js[1][2] = r * sin(theta) * cos(phi);
+        Js[2][0] = cos(theta); Js[2][1] = -r * sin(theta); Js[2][2] = 0;
+        
+        DerivativeForm<1, dim-1, dim> Jrtf_uv = spher_fe_v.jacobian(q);
+        Tensor<1,dim> rtf_u;
+        Tensor<1,dim> rtf_v;
+        for(unsigned int ii = 0; ii < dim; ++ii)
+        {
+          rtf_u[ii] = Jrtf_uv[ii][0];
+          rtf_v[ii] = Jrtf_uv[ii][1];
+        }
+        
+        Tensor<1,dim> xyz_u = Js * rtf_u;
+        Tensor<1,dim> xyz_v = Js * rtf_v;
+        
+        Tensor<1,dim> NN = cross_product_3d(xyz_u,xyz_v);
+        double Nnorm = NN.norm(); 
+        spher_subcell_area += Nnorm * quadrature->weight(q); 
           
-        spher_subcell_area += r*r*sin(theta)*spher_fe_v.JxW(q);
-        //spher_subcell_area += r*spher_fe_v.JxW(q);
+        // spher_subcell_area += r*r*sin(theta)*spher_fe_v.JxW(q);
+        // fake_subcell_area += spher_fe_v.JxW(q);
+        // spher_subcell_area += r*spher_fe_v.JxW(q);
         
         // print spherical quadrature points in spherical coordinates
-        //std::cout<<spher_q_points[q]<<std::endl;
+        // std::cout<<spher_q_points[q]<<std::endl;
       }
       spher_cell_area += spher_subcell_area;
-      //std::cout << "#Area of the subcell: " << spher_subcell_area <<std::endl;   
       
-      // print spherical quadrature points in cartesian cooridnates
-      std::cout<< "# " << cell <<" Quadrature points: "<<std::endl;
-      std::vector<Point<dim>> quadrature_points_rotated;
-      quadrature_points_rotated.resize(n_q_points);
+      // std::cout << "# Area of the subcell: " << spher_subcell_area << std::endl; // << " vs. " << numbers::PI / 8.0 * 3.0 / 4.0 <<std::endl;  
+      // std::cout << "#Area of the subcell in polar plane: " << fake_subcell_area << " vs. " << numbers::PI / 8.0 <<std::endl;   
       
-      Tensor<2,dim> RT;
-      if (sing_on_cell)
-        RT = transpose(Rotations[c]);
-      else
-        RT = Rots[c];
-      
-      for(unsigned int q = 0; q < n_q_points; ++q)
-      {
-        // convert to cartesian each quadrature point
-        double r = spher_q_points[q](0);
-        double theta = spher_q_points[q](1);
-        double phi = spher_q_points[q](2);
-        quadrature_points_rotated[q][0] = r * std::sin(theta) * std::cos(phi);
-        quadrature_points_rotated[q][1] = r * std::sin(theta) * std::sin(phi);
-        quadrature_points_rotated[q][2] = r * std::cos(theta);
-      
-        //rotate each node with RT and shift with singularity
-        quadrature_points_rotated[q] = RT * quadrature_points_rotated[q];
-        quadrature_points_rotated[q] += singularity;
-        // print points
-        std::cout<<quadrature_points_rotated[q]<<std::endl;
-        
-        //compute also maximum distance from quad point and surface
-        const double d = 1.0 - quadrature_points_rotated[q].norm();
-        if (std::abs(d) > std::abs(max_signed_dist))
-          max_signed_dist = d;
-      }  
+//      // print spherical quadrature points in cartesian cooridnates
+//      std::cout<< "# " << cell <<" Quadrature points: "<<std::endl;
+//      std::vector<Point<dim>> quadrature_points_rotated;
+//      quadrature_points_rotated.resize(n_q_points);
+//      
+//      Tensor<2,dim> RT;
+//      if (sing_on_cell)
+//        RT = transpose(Rotations[c]);
+//      else
+//        RT = Rots[c];
+//      
+//      for(unsigned int q = 0; q < n_q_points; ++q)
+//      {
+//        // convert to cartesian each quadrature point
+//        double r = spher_q_points[q](0);
+//        double theta = spher_q_points[q](1);
+//        double phi = spher_q_points[q](2);
+//        quadrature_points_rotated[q][0] = r * std::sin(theta) * std::cos(phi);
+//        quadrature_points_rotated[q][1] = r * std::sin(theta) * std::sin(phi);
+//        quadrature_points_rotated[q][2] = r * std::cos(theta);
+//      
+//        //rotate each node with RT and shift with singularity
+//        quadrature_points_rotated[q] = RT * quadrature_points_rotated[q];
+//        quadrature_points_rotated[q] += singularity;
+//        // print points
+//        std::cout<<quadrature_points_rotated[q]<<std::endl;
+//        
+//        //compute also maximum distance from quad point and surface
+//        const double d = 1.0 - quadrature_points_rotated[q].norm();
+//        if (std::abs(d) > std::abs(max_signed_dist))
+//          max_signed_dist = d;
+//      }  
       
     } //end loop subcells
     
@@ -993,7 +1031,7 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
     
     // error estimators
     ++num_cells;
-    if(true)
+    if(sing_on_cell)
     {
       error_sum += std::abs(cell_area - spher_cell_area);
       error_sum_square += std::pow(std::abs(cell_area - spher_cell_area),2);
