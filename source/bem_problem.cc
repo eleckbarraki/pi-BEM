@@ -528,6 +528,7 @@ namespace
 template <int dim>
 double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
 {
+  std::ofstream file("/home/irene.nesi/Documents/test.csv", std::ios::out | std::ios::trunc);
   double area = 0.0;
 
   FEValues<dim - 1, dim> fe_v(*mapping,
@@ -544,21 +545,46 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
   DoFTools::map_dofs_to_support_points<dim - 1, dim>(*mapping,
                                                      dh,
                                                      support_points);
+  // ensure reordering vectors are populated                                                   
+  compute_reordering_vectors();
+  compute_normals();                                                   
 
   // we start with a loop on all the active cells
   cell_it cell = dh.begin_active(), endc = dh.end();
   
-  unsigned int num_cells = 0;
-  unsigned int n_cells = 0;
-  double error_sum = 0.0;
-  double error_sum_square = 0.0;
-  double error_sum_square_rel = 0.0;
+//  unsigned int num_cells = 0;
+//  unsigned int n_cells = 0;
+//  double error_sum = 0.0;
+//  double error_sum_square = 0.0;
+//  double error_sum_square_rel = 0.0;
   double tot_area_cart = 0.0;
   double tot_area_sph = 0.0;
-  double numC = 0.0;
-  double denC = 0.0;
-  double global_max_signed_dist = 0.0;
+  
+//  std::vector<Point<dim>> distance_cell_sing;
+//  distance_cell_sing.clear();
 
+  // choosing the singularity
+  double sing_index = 200;
+  Point<dim> singularity = support_points[sing_index];//[1448];//[778];//[768];//(0.707106780954304,-0.707106780954304,-5.55111512130257e-17); //(0.0,0.0,0.9);
+    
+  // normal at the singularity dof
+  types::global_dof_index sing_dof = sing_index;   // not needed sing_dof
+  Tensor<1,dim> normal_at_sing;
+  double normy = 0.0;
+  for (unsigned int d = 0; d < dim; ++d)
+  {
+      types::global_dof_index dummy = sub_wise_to_original[sing_dof];
+      
+      types::global_dof_index vec_index =
+          vec_original_to_sub_wise[gradient_dh.n_dofs() / dim * d + dummy];
+      
+      normal_at_sing[d] = vector_normals_solution[vec_index];
+      normy += normal_at_sing[d] * normal_at_sing[d];
+  }
+  normal_at_sing /= std::sqrt(normy);
+  std::cout << "Normal vector to singularity: " << normal_at_sing << std::endl;
+  
+  
   for (cell = dh.begin_active(); cell != endc; ++cell)
   {
     // this is just as usual, we reinitialize fe_v and local_dof_indices on this cell
@@ -566,16 +592,17 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
     cell->get_dof_indices(local_dof_indices);
     
     const std::vector<Point<dim>> &q_points    = fe_v.get_quadrature_points();
-    //const std::vector<Tensor<1, dim>> &normals = fe_v.get_normal_vectors();
+    const std::vector<Tensor<1, dim>> &normals = fe_v.get_normal_vectors();
       
-//    // this is just to check that the first 4 dofs correspond to the vertices
-//    for (unsigned int j=0; j<GeometryInfo<dim - 1>::vertices_per_cell; ++j)
-//    {
-//      std::cout<<"# "<<cell<<"Vert "<<j<<"  "<<std::setprecision(15)<<cell->vertex(j)<<std::endl;
-//    }
+    // this is just to check that the first 4 dofs correspond to the vertices
+    for (unsigned int j=0; j<GeometryInfo<dim - 1>::vertices_per_cell; ++j)
+    {
+      //std::cout<<"# "<<cell<<"Vert "<<j<<"  "<<cell->vertex(j)<<std::endl;
+      std::cout<<cell->vertex(j)<<std::endl;
+    }
       
     //1) we obtain the spherical coordinates of all the cell dofs and the cell vertices
-//    std::cout<<"# "<<cell<<"Supp Cart:  "<<std::endl;
+    //std::cout<<"# "<<cell<<"Supp Cart:  "<<std::endl;
     std::vector<Point<dim> > spher_local_supp_points(fe->dofs_per_cell);
     
     if (dim==2)
@@ -596,23 +623,26 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
     }
     
     bool sing_on_cell = false;
+    bool quasi_sing_cell = false;
     
     //saving matrices for rotation initializing here
     std::vector<Tensor<2,dim>> Rotations;
     Rotations.clear();
+    std::vector<Tensor<2,dim>> QRotations;
+    QRotations.clear();
     std::vector<Tensor<2,dim>> Rots;
     Rots.clear();
+    Point<dim> translation(0.0,0.0,0.0);
 
     using Triangle = std::vector<Point<dim>>;
     std::vector<Triangle> subtriangles(4);
     
-    using SubCell = std::vector<Point<dim>>;   //quadrilateral
-    std::vector<SubCell> subcells;              // variable number of subcells 1 2 3 or 4
-    Point<dim> singularity(0.707106780954304,-0.707106780954304,-5.55111512130257e-17); //(0.0,0.0,0.9);
+    using SubCell = std::vector<Point<dim>>;    //quadrilateral
+    std::vector<SubCell> subcells;              // variable number of subcells 1 2 3 or 4 
     
     if (dim==3)
     {      
-      Point<dim> singularity(0.707106780954304,-0.707106780954304,-5.55111512130257e-17);  //(0.0,0.0,0.9);
+      Point<dim> singularity = support_points[sing_index];
       
       // define local support points to act only on one cell
       std::vector<Point<dim>> local_support_points(fe->dofs_per_cell);
@@ -625,6 +655,7 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
       // rotate cell and singularity coherently in a way that we remove the problem of where is the z axis on the cell, 
       // we do it for everything except for where is the singularity that we split
       
+      // check if the singularity is on the cell
       for (unsigned int jj=0; jj<fe->dofs_per_cell; ++jj)
       {       
         if((singularity-support_points[local_dof_indices[jj]]).norm() < 1e-14)
@@ -634,6 +665,18 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
         }    
       }
       
+      // TODO: check if the cell is quasi singular (3 va bene)
+      if(!sing_on_cell)
+      {
+        Point<dim> distance_cell_sing(singularity - cell->center());
+        double cos_alpha = distance_cell_sing * normal_at_sing / distance_cell_sing.norm() ; // cos alpha
+        if( distance_cell_sing.norm() < 3*cell->diameter() )  // tra 3 e 5 perche (?)
+        {
+          if( std::abs(cos_alpha) >= std::sqrt(2.0)/2.0 )  // from alpha 0 to alpha = 45deg it's acceptable   0.7... = 45 deg   0.5 60 deg
+            quasi_sing_cell = true;
+        } 
+      }
+
 //      // printing the cartesian points
 //      for (unsigned int jj=0; jj<fe->dofs_per_cell; ++jj)
 //      {
@@ -641,14 +684,15 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
 //        std::cout<<std::setprecision(8)<<"#"<<P<<std::endl; 
 //      }
       
-      // if singularity is on cell split the cell, otherwise rotate it
+      // if singularity is on cell split the cell
       if(sing_on_cell)
       {
-        
         std::cout<<"#the singularity is in this cell"<<std::endl;        
         points_to_use = local_support_points;
         sing_to_use = singularity;
         
+        // save translation
+        translation = sing_to_use;
         // TODO: add the points to subtriangles: to each their own following the scheme
         // S A B (P SP) AB SA SB SAB
         // instert an if on FE degree o ci sono trucchi?
@@ -757,16 +801,154 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
 //            std::cout<<subcells.back()[jj]<<std::endl;
 //          }
           
-        }// end loop triangles
-        
+        }// end loop triangles    
       } //end if(sing_on_cell)
-      else
+      else if(quasi_sing_cell)   // if the cell is quasi singular split the cell with the projection of the normal
+      {
+        std::cout<<"#the cell is quasi singular"<<std::endl;
+        
+        QMidpoint<dim-1> midpoint_rule;
+        FEValues<dim-1, dim> fe_mid(*mapping, *fe, midpoint_rule,
+                                      update_normal_vectors);
+        fe_mid.reinit(cell);
+        Tensor<1,dim> cell_normal = fe_mid.normal_vector(0);
+        Tensor<1,dim> to_sing(singularity - cell->center());
+        double normal_component = to_sing * cell_normal;
+        Point<dim> sing_projection;
+        for (unsigned int d = 0; d < dim; ++d)
+            sing_projection[d] = singularity[d] - normal_component * cell_normal[d];
+        
+        Point<dim-1> ref_projection;
+        ref_projection = mapping->transform_real_to_unit_cell(cell, sing_projection); 
+        // Clamp to [0,1]x[0,1] reference cell if outside
+        for (unsigned int d = 0; d < dim-1; ++d)
+          ref_projection[d] = std::max(0.0, std::min(1.0, ref_projection[d]));       
+        Point<dim> closest_point = mapping->transform_unit_to_real_cell(cell, ref_projection);
+        //std::cout << "Normal to the quasi singular cell: " << cell_normal << std::endl;
+        std::cout << "Projection on the quasi singular cell: " << closest_point << std::endl;
+
+        points_to_use = local_support_points;
+        sing_to_use = closest_point;
+        
+        // save translation
+        translation = sing_to_use;
+        
+        // creating subtriangles
+        subtriangles[0] = {{ sing_to_use, points_to_use[0], points_to_use[1] }};
+        subtriangles[1] = {{ sing_to_use, points_to_use[1], points_to_use[3] }};
+        subtriangles[2] = {{ sing_to_use, points_to_use[3], points_to_use[2] }};
+        subtriangles[3] = {{ sing_to_use, points_to_use[2], points_to_use[0] }};
+        
+        // loop on triangles 
+        for (unsigned int i = 0; i < subtriangles.size(); ++i)
+        {        
+          if(!triangle_is_valid(subtriangles[i]))
+          {
+            std::cout<<"#subcell nr. " << i << " is invalid, skip it "<<std::endl;
+            continue;
+          }
+          
+          // move singularity in the origin
+          for (unsigned int jj=1; jj < subtriangles[i].size(); ++jj)
+            subtriangles[i][jj] -= sing_to_use; 
+          
+          // rotate valid triangle
+          const Point<dim> &A = subtriangles[i][1];
+          const Point<dim> &B = subtriangles[i][2];
+          Tensor<1,dim> ex = A / A.norm(); // new x-axis
+          
+          // compute orthonormal basis (ex,ey,ez)
+          Tensor<1,dim> ez = cross_product_3d(ex,B);
+          ez /= ez.norm(); // new z-axis
+          Tensor<1,dim> ey = cross_product_3d(ez, ex); // new y-axis
+
+          // build rotation matrix E = [ex ey ez]
+          Tensor<2,dim> E;
+          for (unsigned int ii=0; ii < dim; ++ii)
+          {
+            E[0][ii] = ex[ii];
+            E[1][ii] = ey[ii];
+            E[2][ii] = ez[ii];
+          }
+          
+          //saving rotations here
+          QRotations.push_back(E);
+          //std::cout << "rotation matrix: \n" << E << "\n" << Rotations.back() << std::endl;
+          
+          for (unsigned int jj=1; jj < subtriangles[i].size(); ++jj)      // rotate subtriangle vertices 1 and 2
+          {
+            const Point<dim> &X = subtriangles[i][jj];
+            Point<dim> Xnew;
+            for (unsigned int kk=0; kk<dim; ++kk)
+            {
+              Xnew[kk] = 0.0;
+              for (unsigned int tt=0; tt<dim; ++tt)
+                Xnew[kk] += E[kk][tt] * X[tt];
+            }
+            subtriangles[i][jj] = Xnew; 
+          }
+          
+          //1) convert to spherical the vertices 1 and 2
+          for (unsigned int jj=1; jj < subtriangles[i].size(); ++jj)
+          {
+            Point<dim> spher;
+            Point<dim> cart(subtriangles[i][jj]);
+            
+            // here we make the conversion
+            double r = cart.norm();
+            double theta = acos(cart(2)/r);
+            double phi = std::atan2(cart(1), cart(0));
+                
+            spher(0)=r; spher(1)=theta;
+            if (dim==3)
+              spher(2)=phi;
+            subtriangles[i][jj] = spher;
+          }
+      
+          //1.1) fix the jump acros -pi and pi for phi   
+          for (unsigned int jj = 1; jj < subtriangles[i].size(); ++jj)
+          {
+            double &phi = subtriangles[i][jj](2);
+            double prev = subtriangles[i][jj-1](2);
+
+            while (phi - prev > numbers::PI)
+              phi -= 2.0 * numbers::PI;
+
+            while (phi - prev < -numbers::PI)
+              phi += 2.0 * numbers::PI;
+          }
+          
+          // modify first point of trinangle to (0, thetaA, phiA)
+          subtriangles[i][0](0) = 0.0;
+          subtriangles[i][0](1) = subtriangles[i][1](1);
+          subtriangles[i][0](2) = subtriangles[i][1](2);
+          
+          //add a point to valid triangles (S, A, B) --> (S, A, B, P)
+          std::cout<<"#creating quadrilateral subcell nr. "<< i <<std::endl;
+          Point<dim> P(subtriangles[i][0](0), subtriangles[i][2](1), subtriangles[i][2](2));
+          SubCell this_cell;
+          this_cell = {{subtriangles[i][0], subtriangles[i][1], subtriangles[i][2], P}};
+          subcells.push_back(this_cell);
+          
+//          // print subcell points
+//          std::cout<<"Subcell nr. "<< i << " dofs: "<<std::endl;        
+//          for (unsigned int jj=0; jj < subcells.back().size(); ++jj)
+//          {
+//            std::cout<<subcells.back()[jj]<<std::endl;
+//          }
+          
+        }// end loop triangles
+      } // end if(quasi_sing_cell)
+      else   // normal cell simply rotate it
       {
         Tensor <2,dim> E;        
         std::cout<<"#no singularity in this cell"<<std::endl;
         points_to_use.resize(fe->dofs_per_cell);
         rotate_cell<dim>(cell, local_support_points, singularity, points_to_use, sing_to_use,E);
         Rots.push_back(E);
+        // save translation
+        translation = sing_to_use;
+        
         //std::cout << "rotation matrix: \n" << E << "\n" << Rots.back() << std::endl;
         //1) convert to spherical
         for (unsigned int j=0; j<fe->dofs_per_cell; ++j)
@@ -775,7 +957,7 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
           Point<dim> cart(points_to_use[j]-sing_to_use);  //coordinates traslated to singularity in r = 0.0
 
           // here we print the (eventually rotated) coordinates of the dofs support points
-          //std::cout<<std::setprecision(8)<<cart<<std::endl;
+          // std::cout<<std::setprecision(8)<<cart<<std::endl;
           
           // here we make the conversion
           double r = cart.norm();
@@ -817,7 +999,6 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
     } // end dim==3   
     
     double spher_cell_area = 0.0;
-    double max_signed_dist = 0.0;
     for(unsigned int c = 0; c<subcells.size(); ++c)
     {  
       //2) create a one cell triangulation with the one cell and cell vertices spherical coordinates
@@ -828,20 +1009,8 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
       spher_vertices.resize(4);
       spher_cells.resize(1);
       
-      if(sing_on_cell)//(true)
+      if(sing_on_cell || quasi_sing_cell)
       {
-//        Point<dim> serv;
-//        serv(1) = numbers::PI / 2;
-//        serv(0) = 0.5;
-//        serv(2) = numbers::PI / 2;
-//        spher_vertices[0] = serv;//subcells[c][0];
-//        serv(2) = numbers::PI / 4;  
-//        spher_vertices[1] = serv; //subcells[c][1];
-//        serv(0) = 1.0;
-//        spher_vertices[2] = serv; //subcells[c][3];
-//        serv(2) = numbers::PI / 2; 
-//        spher_vertices[3] = serv; //subcells[c][2];
-
         spher_vertices[0] = subcells[c][0];
         spher_vertices[1] = subcells[c][1];
         spher_vertices[2] = subcells[c][3];
@@ -886,7 +1055,7 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
       else
         spher_mapping = std::make_shared<MappingQ<dim - 1, dim>>(mapping_degree);
           
-      if(sing_on_cell) //(true)
+      if(sing_on_cell || quasi_sing_cell)
       {
         const std::vector<unsigned int> ref_to_subcell = {0, 1, 3, 2};
         
@@ -925,7 +1094,7 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
       
       // compute subcell area
       double spher_subcell_area = 0.0;
-      double fake_subcell_area = 0.0; 
+      
       for (unsigned int q = 0; q < n_q_points; ++q)
       {
         double r = spher_q_points[q](0);
@@ -937,6 +1106,11 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
         Js[1][0] = sin(theta) * sin(phi); Js[1][1] = r * cos(theta) * sin(phi); Js[1][2] = r * sin(theta) * cos(phi);
         Js[2][0] = cos(theta); Js[2][1] = -r * sin(theta); Js[2][2] = 0;
         
+        Tensor<2,dim> Js_inv_T;   // Js inverso trasposto
+        Js_inv_T[0][0] = sin(theta)*cos(phi); Js_inv_T[0][1] = cos(theta)*cos(phi)/r; Js_inv_T[0][2] = -sin(phi)/(r*sin(theta));
+        Js_inv_T[1][0] = sin(theta)*sin(phi); Js_inv_T[1][1] = cos(theta)*sin(phi)/r; Js_inv_T[1][2] = cos(phi)/(r*sin(theta));
+        Js_inv_T[2][0] = cos(theta); Js_inv_T[2][1] = -sin(theta)/r; Js_inv_T[2][2] = 0;
+        
         DerivativeForm<1, dim-1, dim> Jrtf_uv = spher_fe_v.jacobian(q);
         Tensor<1,dim> rtf_u;
         Tensor<1,dim> rtf_v;
@@ -946,82 +1120,91 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
           rtf_v[ii] = Jrtf_uv[ii][1];
         }
         
-        Tensor<1,dim> xyz_u = Js * rtf_u;
-        Tensor<1,dim> xyz_v = Js * rtf_v;
-        
-        Tensor<1,dim> NN = cross_product_3d(xyz_u,xyz_v);
-        double Nnorm = NN.norm(); 
-        spher_subcell_area += Nnorm * quadrature->weight(q); 
-          
-        // spher_subcell_area += r*r*sin(theta)*spher_fe_v.JxW(q);
-        // fake_subcell_area += spher_fe_v.JxW(q);
-        // spher_subcell_area += r*spher_fe_v.JxW(q);
+        // formula di nanson
+        Tensor<1,dim> NN = cross_product_3d(rtf_u,rtf_v);
+        Tensor<1,dim> Js_inv_T_NN = Js_inv_T * NN; 
+        double area_cell = std::sin(theta) *Js_inv_T_NN.norm();  //r*r*
+
+        // compute double layer potential in spherical coordinates
+        Js_inv_T_NN = Js_inv_T_NN / Js_inv_T_NN.norm();
+        double dGdn = ( Js_inv_T_NN[0] * std::sin(theta) * std::cos(phi) + Js_inv_T_NN[1] * std::sin(theta) * std::sin(phi) + Js_inv_T_NN[2] * std::cos(theta) ) 
+                        / (4*numbers::PI); // r*r
+      
+        spher_subcell_area += dGdn * area_cell * quadrature->weight(q);       
         
         // print spherical quadrature points in spherical coordinates
-        // std::cout<<spher_q_points[q]<<std::endl;
+        std::cout << "# Spherical quad points: " << std::endl;
+        std::cout<<spher_q_points[q]<<std::endl;
       }
       spher_cell_area += spher_subcell_area;
+      // std::cout << "# Area of the subcell: " << spher_subcell_area << std::endl; 
       
-      // std::cout << "# Area of the subcell: " << spher_subcell_area << std::endl; // << " vs. " << numbers::PI / 8.0 * 3.0 / 4.0 <<std::endl;  
-      // std::cout << "#Area of the subcell in polar plane: " << fake_subcell_area << " vs. " << numbers::PI / 8.0 <<std::endl;   
-      
-//      // print spherical quadrature points in cartesian cooridnates
+      // print spherical quadrature points in cartesian cooridnates
 //      std::cout<< "# " << cell <<" Quadrature points: "<<std::endl;
-//      std::vector<Point<dim>> quadrature_points_rotated;
-//      quadrature_points_rotated.resize(n_q_points);
-//      
-//      Tensor<2,dim> RT;
-//      if (sing_on_cell)
-//        RT = transpose(Rotations[c]);
-//      else
-//        RT = Rots[c];
-//      
-//      for(unsigned int q = 0; q < n_q_points; ++q)
-//      {
-//        // convert to cartesian each quadrature point
-//        double r = spher_q_points[q](0);
-//        double theta = spher_q_points[q](1);
-//        double phi = spher_q_points[q](2);
-//        quadrature_points_rotated[q][0] = r * std::sin(theta) * std::cos(phi);
-//        quadrature_points_rotated[q][1] = r * std::sin(theta) * std::sin(phi);
-//        quadrature_points_rotated[q][2] = r * std::cos(theta);
-//      
-//        //rotate each node with RT and shift with singularity
-//        quadrature_points_rotated[q] = RT * quadrature_points_rotated[q];
-//        quadrature_points_rotated[q] += singularity;
-//        // print points
-//        std::cout<<quadrature_points_rotated[q]<<std::endl;
-//        
-//        //compute also maximum distance from quad point and surface
-//        const double d = 1.0 - quadrature_points_rotated[q].norm();
-//        if (std::abs(d) > std::abs(max_signed_dist))
-//          max_signed_dist = d;
-//      }  
+      std::vector<Point<dim>> quadrature_points_rotated;
+      quadrature_points_rotated.resize(n_q_points);
+      
+      Tensor<2,dim> RT;
+      if (sing_on_cell)
+        RT = transpose(Rotations[c]);
+      else if (quasi_sing_cell)
+        RT = transpose(QRotations[c]);
+      else
+        RT = Rots[c];
+      
+      for(unsigned int q = 0; q < n_q_points; ++q)
+      {
+        // convert to cartesian each quadrature point
+        double r = spher_q_points[q](0);
+        double theta = spher_q_points[q](1);
+        double phi = spher_q_points[q](2);
+        quadrature_points_rotated[q][0] = r * std::sin(theta) * std::cos(phi);
+        quadrature_points_rotated[q][1] = r * std::sin(theta) * std::sin(phi);
+        quadrature_points_rotated[q][2] = r * std::cos(theta);
+      
+        //rotate each node with RT and shift with singularity
+        quadrature_points_rotated[q] = RT * quadrature_points_rotated[q];
+        quadrature_points_rotated[q] += translation;
+        // print points
+        //std::cout<<quadrature_points_rotated[q]<<std::endl;
+        
+        // save quadrature points inside a file
+        file << quadrature_points_rotated[q] << "\n";
+      }  
       
     } //end loop subcells
     
-    // compute overall maximum distance quad point-surface
-    std::cout<<"# "<< cell<<" Max distance quad point surface: "<<max_signed_dist<<std::endl;
-    if (std::abs(max_signed_dist) > std::abs(global_max_signed_dist))
-      global_max_signed_dist = max_signed_dist;
-    
 //    // print cartesian quadrature points
-//    std::cout<<"Quadrature points cartesian: "<<std::endl;
+//    std::cout <<"# Quadrature points cartesian: "<<std::endl;
 //    for(unsigned int q = 0; q < n_q_points; ++q)
 //    {
 //      Point<dim> singularity(0.707106780954304,-0.707106780954304,-5.55111512130257e-17);
-//      Point<dim> point(q_points[q]-singularity);
+//      Point<dim> point(q_points[q]);//-singularity);
 //      std::cout<<point<<std::endl;
 //    }
     
-    std::cout<<"# "<< cell<<" Spher area: "<<spher_cell_area<<std::endl;
+//    std::cout<<"# "<< cell<<" Distance from singularity: "<<(dist_quad_sing).norm()<<std::endl;
+    std::cout<<"# "<< cell<<" Int. spher: "<<spher_cell_area<<std::endl;
     
     double cell_area = 0.0; 
     for (unsigned int q = 0; q < n_q_points; ++q)
     {
-      cell_area += fe_v.JxW(q);
+      Tensor<1, dim> RR = q_points[q]-singularity; //distanza euclidea tra xq e x0;
+      Point<dim> DD;
+      double     ss;
+      LaplaceKernel::kernels(RR, DD, ss);
+      double dGGdn = DD * normals[q];
+      
+      cell_area += dGGdn * fe_v.JxW(q);
+      
+      if(quasi_sing_cell)
+      {
+        std::cout << dGGdn << std::endl;
+        //std::cout << q_points[q] << std::endl;
+      }
+                  
     }
-    std::cout<<"# "<< cell<<" Area: "<<cell_area<<std::endl;
+    std::cout<<"# "<< cell<<" Int. cart: "<<cell_area<<std::endl;
     
     //1) obtain the spherical coordinates of all the cell dofs and the cell vertices
     //2) create a local triangulation with the one cell and cell vertices spherical coordinates
@@ -1029,32 +1212,29 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
     //4) use the local dofs coordinate for the local mapping on the new tria/dh
     //5) create and FEValues on the new dh
     
-    // error estimators
-    ++num_cells;
-    if(sing_on_cell)
+    // total error estimators
+    if(true)
     {
-      error_sum += std::abs(cell_area - spher_cell_area);
-      error_sum_square += std::pow(std::abs(cell_area - spher_cell_area),2);
-      error_sum_square_rel += std::pow(std::abs(cell_area - spher_cell_area)/cell_area,2);
-      ++n_cells;
+//      error_sum += std::abs(cell_area - spher_cell_area);
+//      error_sum_square += std::pow(std::abs(cell_area - spher_cell_area),2);
+//      error_sum_square_rel += std::pow(std::abs(cell_area - spher_cell_area)/cell_area,2);
+//      ++n_cells;
       tot_area_cart += cell_area;
       tot_area_sph += spher_cell_area;
-      numC += spher_cell_area * cell_area;
-      denC += cell_area * cell_area;
     }
      
   }
 
-  const double area_error_L1 = error_sum / n_cells;
-  const double area_error_L2 = std::sqrt(error_sum_square / n_cells);
-  const double area_error_relative_L2 = std::sqrt(error_sum_square_rel / n_cells);
-  const double eval_area = 4*numbers::PI/num_cells * n_cells;
-  std::cout<< "Area :" << tot_area_cart << " vs " << tot_area_sph << " vs " << 4*numbers::PI << std::endl; 
-  std::cout << "Area error estimators: " << area_error_L1 << " vs " << area_error_L2 << " vs " << area_error_relative_L2 << std::endl;
-  std::cout << "Total area rel errors: " << std::abs(tot_area_cart-eval_area)/(eval_area) << "\t" << std::abs(tot_area_sph-eval_area)/(eval_area)<< std::endl;
-  std::cout << "C: " << 1-numC/denC << " ---> percentage of area error: " << ((numC/denC) * tot_area_cart - tot_area_cart)/tot_area_cart << std::endl;
-  std::cout << "Max distance quad point-surface: " << global_max_signed_dist << std::endl;
+//  const double area_error_L1 = error_sum / n_cells;
+//  const double area_error_L2 = std::sqrt(error_sum_square / n_cells);
+//  const double area_error_relative_L2 = std::sqrt(error_sum_square_rel / n_cells);
+//  const double eval_area = 4*numbers::PI/num_cells * n_cells;
+//  std::cout << "Area error estimators: " << area_error_L1 << " vs " << area_error_L2 << " vs " << area_error_relative_L2 << std::endl;
+//  std::cout << "Total area rel errors: " << std::abs(tot_area_cart-eval_area)/(eval_area) << "\t" << std::abs(tot_area_sph-eval_area)/(eval_area)<< std::endl;
 
+  std::cout<< "Integral cart: " << tot_area_cart << "    spher: " << tot_area_sph << "    correct: " << 0.5 << std::endl; 
+  std::cout<< "Rel errs cart: " << std::abs(-tot_area_cart-0.5)/0.5 << "    spher: " << std::abs(tot_area_sph-0.5)/0.5 << std::endl; 
+  //std::cout<< "Distance from singularity: "<<dist_quad_sing<<std::endl;
 return area;
 }
 
@@ -1916,7 +2096,9 @@ BEMProblem<dim>::compute_hypersingular_free_coeffs()
                                           update_jacobians |
                                           update_jacobian_grads);
 
-
+  std::vector<Point<dim> > support_points(dh.n_dofs());
+  DoFTools::map_dofs_to_support_points<dim-1, dim>( *mapping, dh,
+    support_points);
 
   cell_it cell = dh.begin_active(), endc = dh.end();
   std::vector<types::global_dof_index> local_dof_indices(fe->dofs_per_cell);
@@ -2076,7 +2258,7 @@ BEMProblem<dim>::compute_hypersingular_free_coeffs()
           hyp_alpha(i) = geom_alpha;
 
           // just in case we need to check the code
-          // pcout<<i<<"->      geom_alpha: "<<geom_alpha<<"
+          pcout<<i<<"->      geom_alpha: "<<geom_alpha<<"  (" << support_points[i] << ")" << std::endl;
           // "<<geom_alpha-alpha(i)<<endl; if (fabs(geom_alpha-alpha(i)) > 1e-3)
           //   pcout<<"HELP!"<<endl;
 

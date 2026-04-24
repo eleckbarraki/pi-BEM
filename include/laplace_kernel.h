@@ -132,7 +132,7 @@ namespace LaplaceKernel
           break;
         case 3:
           d = (1. / (r * 4 * numbers::PI));
-          D = R / (4 * numbers::PI * r2 * r);
+          D = R / (-4 * numbers::PI * r2 * r);
           H = 0;
           /*	for(unsigned int i=0;i<dim;++i)
                 for(unsigned int j=0;j<dim;++j)

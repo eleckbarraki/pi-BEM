@@ -19,9 +19,9 @@ subsection BEMProblem<3>
     set Refinement threshold = 0.3
   end
   subsection Quadrature rules
-    set Quadrature order          = 4
+    set Quadrature order          = 6
     set Quadrature type           = gauss
-    set Singular quadrature order = 5
+    set Singular quadrature order = 7
   end
   subsection Scalar Finite Element
     set Finite Element type  = FEQ
@@ -43,22 +43,22 @@ subsection BoundaryConditions<3>
   set Output file name = result
   subsection Potential 2d
     set Function constants  = 
-    set Function expression = x+y
+    set Function expression = 1
     set Variable names      = x,y,t
   end
   subsection Potential 3d
     set Function constants  = 
-    set Function expression = x+y+z
+    set Function expression = 1
     set Variable names      = x,y,z,t
   end
   subsection Wind function 2d
     set Function constants  = 
-    set Function expression = 1; 1
+    set Function expression = 0; 0
     set Variable names      = x,y,t
   end
   subsection Wind function 3d
     set Function constants  = 
-    set Function expression = 1; 1; 1
+    set Function expression = 0; 0; 0
     set Variable names      = x,y,z,t
   end
 end
@@ -69,18 +69,18 @@ subsection ComputationalDomain<3>
   set Cad tolerance to projectors tolerance ratio                              = 100
   set Cells per circle                                                         = 12
   set Input grid format                                                        = inp
-  set Input grid name                                                          = ../grids/coarse_sphere_double_nodes
+  set Input grid name                                                          = ../grids/flat_cube_double_nodes
   set Input path to CAD files                                                  = ./
   set Max aspect ratio                                                         = 3.5
   set Maximum number of curvature adaptive refinement cycles                   = 5
-  set Number of cycles                                                         = 4
+  set Number of cycles                                                         = 3
   set Number of global refinement to be executed before local refinement cycle = 0
   set Surface curvature adaptive refinement                                    = false
   set Use a spheroid                                                           = false
-  set Use iges surfaces and curves                                             = false
+  set Use iges surfaces and curves                                             = true
   subsection Boundary Conditions ID Numbers
-    set Dirichlet boundary ids = 1,110,110
-    set Neumann boundary ids   = 0,110,110
+    set Dirichlet boundary ids = 0,1,110,110
+    set Neumann boundary ids   = 110,110
   end
 end
 subsection Driver<3>

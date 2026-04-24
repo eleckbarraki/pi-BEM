@@ -27,9 +27,9 @@ subsection BEMProblem<3>
   end
 
   subsection Quadrature rules
-    set Quadrature order          = 4
+    set Quadrature order          = 6
     set Quadrature type           = gauss
-    set Singular quadrature order = 5
+    set Singular quadrature order = 7
   end
 
   subsection Scalar Finite Element
@@ -82,7 +82,7 @@ subsection BoundaryConditions<3>
     # If the function you are describing represents a vector-valued function
     # with multiple components, then separate the expressions for individual
     # components by a semicolon.
-    set Function expression = x+y   # default: 0
+    set Function expression = 1   # default: 0  x+y
 
     # The names of the variables as they will be used in the function,
     # separated by commas. By default, the names of variables at which the
@@ -123,7 +123,7 @@ subsection BoundaryConditions<3>
     # If the function you are describing represents a vector-valued function
     # with multiple components, then separate the expressions for individual
     # components by a semicolon.
-    set Function expression = x+y+z   # default: 0
+    set Function expression = 1 # default: 0  x+y+z
 
     # The names of the variables as they will be used in the function,
     # separated by commas. By default, the names of variables at which the
@@ -164,7 +164,7 @@ subsection BoundaryConditions<3>
     # If the function you are describing represents a vector-valued function
     # with multiple components, then separate the expressions for individual
     # components by a semicolon.
-    set Function expression = 1; 1  # default: 0; 0
+    set Function expression = 0; 0  # default: 1; 1
 
     # The names of the variables as they will be used in the function,
     # separated by commas. By default, the names of variables at which the
@@ -205,7 +205,7 @@ subsection BoundaryConditions<3>
     # If the function you are describing represents a vector-valued function
     # with multiple components, then separate the expressions for individual
     # components by a semicolon.
-    set Function expression = 1; 1; 1 # default: 0; 0; 0 
+    set Function expression = 0; 0; 0 # default: 0; 0; 0  1; 1; 1 
 
     # The names of the variables as they will be used in the function,
     # separated by commas. By default, the names of variables at which the
@@ -231,20 +231,20 @@ subsection ComputationalDomain<3>
   set Cad tolerance to projectors tolerance ratio                              = 100
   set Cells per circle                                                         = 12
   set Input grid format                                                        = inp
-  set Input grid name                                                          = ../grids/coarse_sphere_double_nodes
+  set Input grid name                                                          = ../grids/flat_cube_double_nodes
   set Input path to CAD files                                                  = ./
   set Max aspect ratio                                                         = 3.5
   set Maximum number of curvature adaptive refinement cycles                   = 5
-  set Number of cycles                                                         = 4
+  set Number of cycles                                                         = 3
   set Number of global refinement to be executed before local refinement cycle = 0
   set Surface curvature adaptive refinement                                    = false
   set Use a spheroid                                                           = false
-  set Use iges surfaces and curves                                             = false
+  set Use iges surfaces and curves                                             = true
 
 
   subsection Boundary Conditions ID Numbers
-    set Dirichlet boundary ids = 1,110,110
-    set Neumann boundary ids   = 0,110,110
+    set Dirichlet boundary ids = 0,1,110,110
+    set Neumann boundary ids   = 110,110
   end
 
 end
