@@ -421,7 +421,8 @@ BEMProblem<dim>::reinit()
 template <int dim>
 double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
 {
-  std::ofstream file("/home/irene.nesi/Documents/test.csv", std::ios::out | std::ios::trunc);
+  std::ofstream file("quadrature_points.csv", std::ios::out | std::ios::trunc);
+  file << "x y z" << "\n";
   double area = 0.0;
 
   FEValues<dim - 1, dim> fe_v(*mapping,
@@ -450,27 +451,9 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
   double tot_area_spec = 0.0;
 
   // choosing the singularity
-  double sing_index = 200;
+  double sing_index = 1448;
   Point<dim> singularity = support_points[sing_index];//[1448];//[778];//[768];
-    
-  // find the normal at the singularity dof                                                 
-  compute_reordering_vectors();
-  compute_normals(); 
-  types::global_dof_index sing_dof = sing_index;
-  Tensor<1,dim> normal_at_sing;
-  double normy = 0.0;
-  for (unsigned int d = 0; d < dim; ++d)
-  {
-      types::global_dof_index dummy = sub_wise_to_original[sing_dof];
-      
-      types::global_dof_index vec_index =
-          vec_original_to_sub_wise[gradient_dh.n_dofs() / dim * d + dummy];
-      
-      normal_at_sing[d] = vector_normals_solution[vec_index];
-      normy += normal_at_sing[d] * normal_at_sing[d];
-  }
-  normal_at_sing /= std::sqrt(normy);
-  std::cout << "#Normal vector to singularity: " << normal_at_sing << std::endl;
+//  Point<dim-1> ref_sing;
   
   // loop on cells
   for (cell = dh.begin_active(); cell != endc; ++cell)
@@ -499,10 +482,8 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
       AssertThrow(dim == 3, ExcMessage("Not yet implemented for dim = 2"));
     }
     
-    if constexpr (dim==3)
-    {      
-      //Point<dim> singularity = support_points[sing_index];
-      
+    if constexpr (dim==3)   // TODO: come lo tolgo constexpr, serve per far funzionare qsplit
+    {            
       // define local support points to act only on one cell
       std::vector<Point<dim>> local_support_points(fe->dofs_per_cell);
       for (unsigned int i = 0; i < fe->dofs_per_cell; ++i)
@@ -526,6 +507,7 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
         QuasiSingularKernelIntegral<dim> qski(cell, *fe, *mapping, singularity);
         double dist_to_cell = qski.min_distance;
         double dist_to_center = (singularity - cell->center()).norm();
+//        ref_sing = qski.get_eta();    // TODO: problema con eta non corretto (?)
         if(dist_to_center - 0.5*cell->diameter() < 0.1)
         {
           if(dist_to_cell < 0.3)       
@@ -536,9 +518,9 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
       // if singularity is on cell Qsplit and QDuffy     
       if(sing_on_cell)
       {
-        std::cout<<"#the singularity is in this cell"<<std::endl;        
+        std::cout<<"#the singularity is in this cell"<<std::endl;
         
-        // find reference coordinates of singularity on this cell
+        // find reference coordinates of singularity on this cell   // TODO: to be removed
         Point<dim-1> ref_sing;
         bool is_at_vertex = false;
         unsigned int vertex_index = 0;
@@ -557,13 +539,13 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
         if(!is_at_vertex)
           ref_sing = mapping->transform_real_to_unit_cell(cell, singularity);
         
-        std::cout << "#Singularity reference coords: " << ref_sing << (is_at_vertex ? " (vertex)" : " (interior/edge)") << std::endl;  
-        
+        std::cout << "#Singularity reference coords: " << ref_sing << (is_at_vertex ? " (vertex)" : " (interior/edge)") << std::endl;         
+               
         // use qsplit and qduffy
         //    QDuffy(n, beta): n = quadrature order, beta = 1.0 standard for 1/R singularities
         //    QSplit automatically splits the reference cell into triangles
         //    all with vertex zero at ref_sing, then applies QDuffy to each
-        unsigned int n_duffy = 8;
+        unsigned int n_duffy = singular_quadrature_order;
         QDuffy duffy_quad(n_duffy, 1.0);
         QSplit<dim-1> split_quad(duffy_quad, ref_sing);
         FEValues<dim-1, dim> sing_fe_v(*mapping, *fe, split_quad,
@@ -583,8 +565,8 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
       else if(quasi_sing_cell)   // if the cell is quasi singular use QTelles
       {
         std::cout<<"#the cell is quasi singular"<<std::endl;
-        
-        // TODO: use mola code
+               
+        // TODO: to be removed
         // find closest point to the singularity on the cell
         QMidpoint<dim-1> midpoint_rule;
         FEValues<dim-1, dim> fe_mid(*mapping, *fe, midpoint_rule,
@@ -601,17 +583,16 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
         ref_projection = mapping->transform_real_to_unit_cell(cell, sing_projection); 
         // clamp to [0,1]x[0,1] reference cell if outside
         for (unsigned int d = 0; d < dim-1; ++d)
-          ref_projection[d] = std::max(0.0, std::min(1.0, ref_projection[d]));       
+          ref_projection[d] = std::max(0.0, std::min(1.0, ref_projection[d]));
         Point<dim> closest_point = mapping->transform_unit_to_real_cell(cell, ref_projection);
 
         // printing to check
-        //std::cout << "Normal to the quasi singular cell: " << cell_normal << std::endl;
         std::cout << "# Projection on the quasi singular cell: " << closest_point << std::endl;
         std::cout << "# Distance from singularity: " << (singularity-closest_point).norm() << std::endl;
 
         //build FEValues with the Telles quadrature on this cell
-        unsigned int n_telles = 8;
-        QTelles<dim-1> telles_quad(n_telles, ref_projection);    //TODO: what do I put into ref_projection?
+        unsigned int n_telles = quadrature_order;
+        QTelles<dim-1> telles_quad(n_telles, ref_projection);
         FEValues<dim-1, dim> telles_fe_v(*mapping, 
                                           *fe, 
                                           telles_quad,
@@ -643,30 +624,18 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
       } // end else
     } // end dim==3   
     
-    double spec_cell_area = 0.0;
-       
+    // compute integral with special quadrature on the cell
+    double spec_cell_area = 0.0;  
     for (unsigned int q = 0; q < spec_n_q; ++q)
     {
-      Tensor<1, dim> RR = spec_q_points[q]-singularity; //distanza euclidea tra xq e x0;
+      Tensor<1, dim> RR = spec_q_points[q]-singularity;
       Point<dim> DD;
       double     ss;
       LaplaceKernel::kernels(RR, DD, ss);
       double dGdn = DD * spec_normals[q];
       
-      if(sing_on_cell)
-      {
-        spec_cell_area += dGdn * spec_JxW[q];
-      }
-      else if(quasi_sing_cell)
-      {
-        spec_cell_area += + dGdn * spec_JxW[q];
-      }
-      else
-      {
-        spec_cell_area += + dGdn * spec_JxW[q];
-      }  
+      spec_cell_area += dGdn * spec_JxW[q]; 
     }
-    
     std::cout<<"# "<< cell<<" Int. special: "<<spec_cell_area<<std::endl;
         
     // print special quadrature nodes
@@ -675,11 +644,12 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
       //std::cout << spec_q_points[q] << std::endl;
       file << spec_q_points[q] << "\n";      
     }
-     
+    
+    // compute integral with standard quadrature 
     double cell_area = 0.0; 
     for (unsigned int q = 0; q < n_q_points; ++q)
     {
-      Tensor<1, dim> RR = q_points[q]-singularity; //distanza euclidea tra xq e x0;
+      Tensor<1, dim> RR = q_points[q]-singularity;
       Point<dim> DD;
       double     ss;
       LaplaceKernel::kernels(RR, DD, ss);
@@ -687,6 +657,7 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
       
       cell_area += dGGdn * fe_v.JxW(q);                  
     }
+    std::cout<<"# "<< cell<<" Int.  normal: "<<cell_area<<std::endl;
     
 //    // print cartesian quadrature points
 //    std::cout <<"# Quadrature points cartesian: "<<std::endl;
@@ -697,9 +668,7 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
 //      std::cout<<point<<std::endl;
 //    }
     
-    std::cout<<"# "<< cell<<" Int.  normal: "<<cell_area<<std::endl;
-    
-    // total error estimators
+    // total quantities over all cells
     tot_area_cart += cell_area;
     tot_area_spec += spec_cell_area;
      

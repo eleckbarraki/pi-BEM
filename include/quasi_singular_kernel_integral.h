@@ -67,6 +67,8 @@ public:
   find_closest_reference_cell_point(const Point<dim> &external_point);
 
   double min_distance;
+  
+  Point<dim-1> get_eta() const { return eta; }
 
 
 private:
