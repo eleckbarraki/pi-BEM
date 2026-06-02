@@ -11,6 +11,7 @@
 #include "../include/laplace_kernel.h"
 #include "../include/singular_kernel_integral.h"
 #include "../include/quasi_singular_kernel_integral.h"
+#include "../include/telles_quadrature.h"
 #include "Teuchos_TimeMonitor.hpp"
 
 using Teuchos::RCP;
@@ -438,7 +439,12 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
   std::vector<Point<dim>> support_points(dh.n_dofs());
   DoFTools::map_dofs_to_support_points<dim - 1, dim>(*mapping,
                                                      dh,
-                                                     support_points);                                                  
+                                                     support_points); 
+                                                     
+  // print all dof numbers and coordinates
+  std::cout<< "# All dofs:"<<std::endl;
+  for (unsigned int k = 0; k < dh.n_dofs(); ++k)
+    std::cout << k << " -> " << support_points[k] << std::endl;                                                                                                  
 
   cell_it cell = dh.begin_active(), endc = dh.end();
   
@@ -451,9 +457,12 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
   double tot_area_spec = 0.0;
 
   // choosing the singularity
-  double sing_index = 1448;
-  Point<dim> singularity = support_points[sing_index];//[1448];//[778];//[768];
-//  Point<dim-1> ref_sing;
+  // 3 -> 0.96875 0.0605469 0.00625   per 4 deg of refinement
+  // 1337 -> 0.96875 0.0605469 0.00625
+  // 1332 -> 0.984375 0.0307617 0.003125
+  double sing_index = 1337;//1332;
+  Point<dim> singularity = support_points[sing_index];//[1448];//[778];//[768];//[332];
+  Point<dim-1> ref_qsing;
   
   // loop on cells
   for (cell = dh.begin_active(); cell != endc; ++cell)
@@ -466,6 +475,7 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
     const std::vector<Tensor<1, dim>> &normals = fe_v.get_normal_vectors();
       
     // print the vertices of the cell
+    std::cout<< "# "<< cell<<" vertices:"<<std::endl;
     for (unsigned int j=0; j<GeometryInfo<dim - 1>::vertices_per_cell; ++j)
       std::cout<<cell->vertex(j)<<std::endl;
     
@@ -504,23 +514,47 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
       // check if the cell is quasi singular: if it's close enough to singularity
       if(!sing_on_cell)
       {  
-        QuasiSingularKernelIntegral<dim> qski(cell, *fe, *mapping, singularity);
-        double dist_to_cell = qski.min_distance;
         double dist_to_center = (singularity - cell->center()).norm();
-//        ref_sing = qski.get_eta();    // TODO: problema con eta non corretto (?)
-        if(dist_to_center - 0.5*cell->diameter() < 0.1)
+        double h = cell->diameter();
+        if(dist_to_center - 0.5*h < 0.1)
         {
-          if(dist_to_cell < 0.3)       
+          QuasiSingularKernelIntegral<dim> qski(cell, *fe, *mapping, singularity);
+          ref_qsing = qski.get_eta();
+          double dist_to_cell = qski.min_distance;
+//          double tol = pow(10.0, -2.2);
+//          double N = quadrature_order;
+//          double fact_N  = std::tgamma(N + 1.0);   // = n!
+//          double fact_2N = std::tgamma(2.0*N + 1.0); // = (2n)!
+//          double d_star = std::pow( (fact_2N*fact_2N) / (fact_N*fact_N*fact_N) * std::pow(4.0, N) * tol, -1.0/( 2.0*N ) ) * h;
+//          bool sing_inside = ( (ref_qsing[0] > 0) && (ref_qsing[0] < 1) ) || ( (ref_qsing[1] > 0) && (ref_qsing[1] < 1) );
+//          
+//          
+//          Point<dim> qsing = mapping->transform_unit_to_real_cell(cell, ref_qsing);
+//          Quadrature<2> one_point_quadrature(ref_qsing); // single point quadrature
+//          FEValues<2,3> one_point_fe(*mapping, *fe, one_point_quadrature,
+//                                  update_jacobians | update_normal_vectors);
+//          one_point_fe.reinit(cell);
+//          const std::vector<Tensor<1, dim>> &one_point_normal = one_point_fe.get_normal_vectors();
+//       
+//          Tensor<1, dim> dist_vector = singularity-qsing;
+//          double dist_scalar =- dist_vector * one_point_normal[0];
+//          bool is_vertical = (dist_vector.norm() == dist_scalar);  
+
+          if(dist_to_cell < 0.01) //(dist_to_cell < d_star) && is_vertical)
+          {        
             quasi_sing_cell = true;
+//            std::cout<< cell << "    normal: " << one_point_normal[0] << "   distance v: " << dist_vector.norm() << " distance s: " << dist_scalar << std::endl;
+//            std::cout<< cell << "    ref_qsing: " << ref_qsing <<"   diameter:" << h << "     d* : " << d_star << std::endl;
+          }
         }  
       }
       
       // if singularity is on cell Qsplit and QDuffy     
       if(sing_on_cell)
       {
-        std::cout<<"#the singularity is in this cell"<<std::endl;
+        std::cout<< "# "<< cell<<" the singularity is in this cell"<<std::endl;
         
-        // find reference coordinates of singularity on this cell   // TODO: to be removed
+        // find reference coordinates of singularity on this cell  // TODO: to be changed for feq 2 and more
         Point<dim-1> ref_sing;
         bool is_at_vertex = false;
         unsigned int vertex_index = 0;
@@ -554,7 +588,7 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
         sing_fe_v.reinit(cell);
         
         // assign correct values of quadrature nodes, normals and jacobianxweight
-        spec_n_q = split_quad.size();   //sing_fe_v.n_quadrature_points;
+        spec_n_q = split_quad.size();
         spec_q_points = sing_fe_v.get_quadrature_points();
         spec_normals = sing_fe_v.get_normal_vectors();
         spec_JxW.resize(spec_n_q);
@@ -564,41 +598,51 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
       } //end if(sing_on_cell)
       else if(quasi_sing_cell)   // if the cell is quasi singular use QTelles
       {
-        std::cout<<"#the cell is quasi singular"<<std::endl;
-               
-        // TODO: to be removed
-        // find closest point to the singularity on the cell
-        QMidpoint<dim-1> midpoint_rule;
-        FEValues<dim-1, dim> fe_mid(*mapping, *fe, midpoint_rule,
-                                      update_normal_vectors);
-        fe_mid.reinit(cell);
-        Tensor<1,dim> cell_normal = fe_mid.normal_vector(0);
-        Tensor<1,dim> to_sing(singularity - cell->center());
-        double normal_component = to_sing * cell_normal;
-        Point<dim> sing_projection;
-        for (unsigned int d = 0; d < dim; ++d)
-            sing_projection[d] = singularity[d] - normal_component * cell_normal[d];
+        std::cout<< "# "<< cell<<" the cell is quasi singular"<<std::endl;
+        //Point<dim> closest_point = mapping->transform_unit_to_real_cell(cell, ref_qsing);
         
-        Point<dim-1> ref_projection;
-        ref_projection = mapping->transform_real_to_unit_cell(cell, sing_projection); 
-        // clamp to [0,1]x[0,1] reference cell if outside
-        for (unsigned int d = 0; d < dim-1; ++d)
-          ref_projection[d] = std::max(0.0, std::min(1.0, ref_projection[d]));
-        Point<dim> closest_point = mapping->transform_unit_to_real_cell(cell, ref_projection);
+        // diy telles
+        Quadrature<2> telles_quad = telles_quadrature(
+                                      cell,
+                                      *mapping,
+                                      singularity,
+                                      ref_qsing,
+                                      quadrature_order,
+                                      2  // alpha=2 for 1/r^2 kernel
+                                      );
+        FEValues<2,3> telles_fe_v(*mapping, *fe, telles_quad,
+                                  update_values | update_gradients | update_normal_vectors |
+                                  update_jacobians | update_quadrature_points | update_JxW_values);
+        telles_fe_v.reinit(cell);                               
+        
+//        // find closest point to the singularity on the cell
+//        QMidpoint<dim-1> midpoint_rule;
+//        FEValues<dim-1, dim> fe_mid(*mapping, *fe, midpoint_rule,
+//                                      update_normal_vectors);
+//        fe_mid.reinit(cell);
+//        Tensor<1,dim> cell_normal = fe_mid.normal_vector(0);
+//        Tensor<1,dim> to_sing(singularity - cell->center());
+//        double normal_component = to_sing * cell_normal;
 
-        // printing to check
-        std::cout << "# Projection on the quasi singular cell: " << closest_point << std::endl;
-        std::cout << "# Distance from singularity: " << (singularity-closest_point).norm() << std::endl;
+//        Point<dim> sing_projection;
+//        for (unsigned int d = 0; d < dim; ++d)
+//            sing_projection[d] = singularity[d] - normal_component * cell_normal[d];
+//        Point<dim-1> ref_projection = mapping->transform_real_to_unit_cell(cell, sing_projection);
 
-        //build FEValues with the Telles quadrature on this cell
-        unsigned int n_telles = quadrature_order;
-        QTelles<dim-1> telles_quad(n_telles, ref_projection);
-        FEValues<dim-1, dim> telles_fe_v(*mapping, 
-                                          *fe, 
-                                          telles_quad,
-                                          update_values | update_gradients | update_normal_vectors |
-                                          update_jacobians | update_quadrature_points | update_JxW_values);
-        telles_fe_v.reinit(cell);
+//        // printing to check
+//        std::cout << "# Projection on the quasi singular cell: " << closest_point << std::endl;
+//        std::cout << "# Distance from singularity: " << (singularity-closest_point).norm() << std::endl;
+
+        
+//        //build FEValues with the Telles quadrature on this cell
+//        unsigned int n_telles = quadrature_order;
+//        QTelles<dim-1> telles_quad(n_telles, ref_qsing);
+//        FEValues<dim-1, dim> telles_fe_v(*mapping, 
+//                                          *fe, 
+//                                          telles_quad,
+//                                          update_values | update_gradients | update_normal_vectors |
+//                                          update_jacobians | update_quadrature_points | update_JxW_values);
+//        telles_fe_v.reinit(cell);
         
         // assign correct values of quadrature nodes, normals and jacobianxweight
         spec_n_q = telles_quad.size();
@@ -611,7 +655,7 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
       } // end if(quasi_sing_cell)
       else   // normal cell
       {     
-        std::cout<<"#no singularity in this cell"<<std::endl;
+        std::cout<<"# "<< cell<<" no singularity in this cell"<<std::endl;
         
         // assign correct values of quadrature nodes, normals and jacobianxweight
         spec_n_q = n_q_points;
