@@ -529,7 +529,7 @@ namespace
 template <int dim>
 double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
 {
-  std::ofstream file("/home/irene.nesi/Documents/test.csv", std::ios::out | std::ios::trunc);
+  std::ofstream file("test.csv", std::ios::out | std::ios::trunc);
   double area = 0.0;
 
   FEValues<dim - 1, dim> fe_v(*mapping,
@@ -557,13 +557,68 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
   double tot_area_cart = 0.0;
   double tot_area_sph = 0.0;
 
-  // choosing the singularity
-  double sing_index = 200;
-  Point<dim> singularity = support_points[sing_index];//[1448];//[778];//[768];//(0.707106780954304,-0.707106780954304,-5.55111512130257e-17); //(0.0,0.0,0.9);
+  // Choose a reproducible singularity close to a geometric edge. The closest
+  // support point is selected so the test remains stable under refinement.
+  Point<dim> target_singularity;
+  if (dim == 3)
+    target_singularity = Point<dim>(0.625, 0.04, 0.075);
+  else if (dim == 2)
+    target_singularity = Point<dim>(0.625, 0.04);
+
+  const Vector<double> localized_hyp_alpha(hyp_alpha);
+
+  types::global_dof_index sing_index = 0;
+  double                  min_singularity_distance =
+    std::numeric_limits<double>::max();
+  bool found_smooth_near_edge_dof = false;
+
+  for (types::global_dof_index i = 0; i < support_points.size(); ++i)
+    {
+      if (std::abs(localized_hyp_alpha[i] - 0.5) > 1e-8)
+        continue;
+
+      const double distance = support_points[i].distance(target_singularity);
+      if (distance < min_singularity_distance)
+        {
+          min_singularity_distance = distance;
+          sing_index               = i;
+          found_smooth_near_edge_dof = true;
+        }
+    }
+
+  if (!found_smooth_near_edge_dof)
+    {
+      min_singularity_distance = std::numeric_limits<double>::max();
+      for (types::global_dof_index i = 0; i < support_points.size(); ++i)
+        {
+          const double distance = support_points[i].distance(target_singularity);
+          if (distance < min_singularity_distance)
+            {
+              min_singularity_distance = distance;
+              sing_index               = i;
+            }
+        }
+    }
+
+  Point<dim> singularity = support_points[sing_index];
+  const double correct_geom_alpha = localized_hyp_alpha[sing_index];
+
+  Vector<double> cartesian_integral_per_cell(dh.get_triangulation().n_active_cells());
+  Vector<double> spherical_integral_per_cell(dh.get_triangulation().n_active_cells());
+  Vector<double> absolute_error_per_cell(dh.get_triangulation().n_active_cells());
+  Vector<double> relative_error_per_cell(dh.get_triangulation().n_active_cells());
+  Vector<double> quasi_singular_cell_flag(dh.get_triangulation().n_active_cells());
+  Vector<double> singular_cell_flag(dh.get_triangulation().n_active_cells());
+  Vector<double> distance_to_singularity_over_cell_diameter(
+    dh.get_triangulation().n_active_cells());
+  Vector<double> telles_order_per_cell(dh.get_triangulation().n_active_cells());
+  Vector<double> relative_error_vs_smooth_field(dh.get_triangulation().n_active_cells());
+  Vector<double> relative_error_vs_geom_alpha_field(dh.get_triangulation().n_active_cells());
     
   // find the normal at the singularity dof                                                 
   compute_reordering_vectors();
   compute_normals(); 
+  const Vector<double> localized_normals(vector_normals_solution);
   types::global_dof_index sing_dof = sing_index;
   Tensor<1,dim> normal_at_sing;
   double normy = 0.0;
@@ -574,12 +629,10 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
       types::global_dof_index vec_index =
           vec_original_to_sub_wise[gradient_dh.n_dofs() / dim * d + dummy];
       
-      normal_at_sing[d] = vector_normals_solution[vec_index];
+      normal_at_sing[d] = localized_normals[vec_index];
       normy += normal_at_sing[d] * normal_at_sing[d];
   }
   normal_at_sing /= std::sqrt(normy);
-  std::cout << "Normal vector to singularity: " << normal_at_sing << std::endl;
-  
   // loop on cells
   for (cell = dh.begin_active(); cell != endc; ++cell)
   {
@@ -589,13 +642,6 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
     
     const std::vector<Point<dim>> &q_points    = fe_v.get_quadrature_points();
     const std::vector<Tensor<1, dim>> &normals = fe_v.get_normal_vectors();
-      
-    // this is just to check that the first 4 dofs correspond to the vertices
-    for (unsigned int j=0; j<GeometryInfo<dim - 1>::vertices_per_cell; ++j)
-    {
-      //std::cout<<"# "<<cell<<"Vert "<<j<<"  "<<cell->vertex(j)<<std::endl;
-      std::cout<<cell->vertex(j)<<std::endl;
-    }
       
     //1) we obtain the spherical coordinates of all the cell dofs and the cell vertices
     //std::cout<<"# "<<cell<<"Supp Cart:  "<<std::endl;
@@ -639,6 +685,9 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
     
     Point<dim> sing_to_use(0.0,0.0,0.0);
     Point<dim-1> qsing_to_use(0.0,0.0);
+    bool use_telles_cell = false;
+    double distance_to_singularity_ratio =
+      std::numeric_limits<double>::infinity();
     
     if (dim==3)
     {      
@@ -653,11 +702,13 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
       
       
       // check if the singularity is on the cell
+      unsigned int singular_local_index = numbers::invalid_unsigned_int;
       for (unsigned int jj=0; jj<fe->dofs_per_cell; ++jj)
       {       
         if((singularity-support_points[local_dof_indices[jj]]).norm() < 1e-14)
         {
           sing_on_cell = true;
+          singular_local_index = jj;
           break;
         }    
       }
@@ -665,45 +716,12 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
       // check if the cell is quasi singular: if it's close enough to singularity
       if(!sing_on_cell)
       {
-        Point<dim-1> ref_sing;
-        bool mapping_succeeded = false;
-
-        try
-        {
-          ref_sing = mapping->transform_real_to_unit_cell(cell, singularity);
-          mapping_succeeded = true;
-        }
-        catch(...)
-        {
-          mapping_succeeded = false;
-        }
-
-        if(!mapping_succeeded)
-        {
-          // fallback: find closest vertex
-          double min_dist = std::numeric_limits<double>::max();
-          for (unsigned int v = 0; v < GeometryInfo<dim-1>::vertices_per_cell; ++v)
-          {
-            double d = (singularity - cell->vertex(v)).norm();
-            if(d < min_dist)
-            {
-              min_dist = d;
-              ref_sing = GeometryInfo<dim-1>::unit_cell_vertex(v);
-            }
-          }
-        }
-
-        // clamp to [0,1]^(dim-1)
-        for (unsigned int d = 0; d < dim-1; ++d)
-          ref_sing[d] = std::max(0.0, std::min(1.0, ref_sing[d]));
-
-        Point<dim> closest_point = mapping->transform_unit_to_real_cell(cell, ref_sing);
-//        double dist_to_cell = (singularity - closest_point).norm();
-        
-        
         QuasiSingularKernelIntegral<dim> qski(cell, *fe, *mapping, singularity);
-        Point<dim-1>  ref_coord_minimum = qski.find_closest_reference_cell_point(singularity);
+        qsing_to_use = qski.find_closest_reference_cell_point(singularity);
+        for (unsigned int d = 0; d < dim-1; ++d)
+          qsing_to_use[d] = std::max(0.0, std::min(1.0, qsing_to_use[d]));
         double dist_to_cell = qski.min_distance;
+        distance_to_singularity_ratio = dist_to_cell / cell->diameter();
         double dist_to_center = (singularity - cell->center()).norm();
         //if(dist_to_cell < 4 * cell->diameter())
         if(dist_to_center - 0.5*cell->diameter() < 0.1)
@@ -721,9 +739,8 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
 //      }
       
       // if singularity is on cell split the cell      
-      if(sing_on_cell)
+      if(sing_on_cell && fe->degree == 1)
       {
-        std::cout<<"#the singularity is in this cell"<<std::endl;        
         points_to_use = local_support_points;
         sing_to_use = singularity;
         
@@ -742,7 +759,6 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
         {        
           if(!triangle_is_valid(subtriangles[i]))
           {
-            std::cout<<"#subcell nr. " << i << " is invalid, skip it "<<std::endl;
             continue;
           }
           
@@ -838,36 +854,27 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
           
         }// end loop triangles    
       } //end if(sing_on_cell)
-      else if(quasi_sing_cell)   // if the cell is quasi singular use telles quadrature
+      else if(sing_on_cell)
       {
-        std::cout<<"#the cell is quasi singular"<<std::endl;
-        
-        // find closest point to the singularity on the cell
-        QMidpoint<dim-1> midpoint_rule;
-        FEValues<dim-1, dim> fe_mid(*mapping, *fe, midpoint_rule,
-                                      update_normal_vectors);
-        fe_mid.reinit(cell);
-        Tensor<1,dim> cell_normal = fe_mid.normal_vector(0);
-        Tensor<1,dim> to_sing(singularity - cell->center());
-        double normal_component = to_sing * cell_normal;
-        Point<dim> sing_projection;
-        for (unsigned int d = 0; d < dim; ++d)
-            sing_projection[d] = singularity[d] - normal_component * cell_normal[d];
-        
-        Point<dim-1> ref_projection;
-        ref_projection = mapping->transform_real_to_unit_cell(cell, sing_projection); 
-        // clamp to [0,1]x[0,1] reference cell if outside
-        for (unsigned int d = 0; d < dim-1; ++d)
-          ref_projection[d] = std::max(0.0, std::min(1.0, ref_projection[d]));       
-        Point<dim> closest_point = mapping->transform_unit_to_real_cell(cell, ref_projection);
-
-        // printing to check
-        //std::cout << "Normal to the quasi singular cell: " << cell_normal << std::endl;
-        std::cout << "Projection on the quasi singular cell: " << closest_point << std::endl;
-        std::cout << "Distance from singularity: " << (singularity-closest_point).norm() << std::endl;
+        Assert(singular_local_index != numbers::invalid_unsigned_int,
+               ExcInternalError());
 
         points_to_use = local_support_points;
-        qsing_to_use = ref_projection;     
+        qsing_to_use = fe->get_unit_support_points()[singular_local_index];
+        use_telles_cell = true;
+        distance_to_singularity_ratio = 0.0;
+
+        Tensor<2,dim> I = unit_symmetric_tensor<dim>();
+        translation = Point<dim>();
+        QRotations.push_back(I);
+
+        subcells.resize(1);
+        subcells[0] = points_to_use;
+      }
+      else if(quasi_sing_cell)   // if the cell is quasi singular use telles quadrature
+      {
+        points_to_use = local_support_points;
+        use_telles_cell = true;
         
         // save rotation and translation
         Tensor<2,dim> I = unit_symmetric_tensor<dim>();
@@ -876,15 +883,13 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
         
         // create one single subcell
         subcells.resize(1);
-        subcells[0] ={{points_to_use[0], points_to_use[1], 
-                    points_to_use[2], points_to_use[3]}};
+        subcells[0] = points_to_use;
         
 
       } // end if(quasi_sing_cell)
       else   // normal cell simply rotate it
       {
         Tensor <2,dim> E;        
-        std::cout<<"#no singularity in this cell"<<std::endl;
         points_to_use.resize(fe->dofs_per_cell);
         rotate_cell<dim>(cell, local_support_points, singularity, points_to_use, sing_to_use,E);
         
@@ -935,8 +940,7 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
         
         // create one single subcell
         subcells.resize(1);
-        subcells[0] ={{spher_local_supp_points[0], spher_local_supp_points[1], 
-                    spher_local_supp_points[2], spher_local_supp_points[3]}};
+        subcells[0] = spher_local_supp_points;
         
       } // end else
     } // end dim==3   
@@ -1004,7 +1008,10 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
         
         for (unsigned int j=0; j<fe->dofs_per_cell; ++j)    //TODO: now works only for linear fe
         {
-          const Point<dim> &p = subcells[c][ref_to_subcell[j]];//spher_vertices[ref_to_subcell[j]];
+          const Point<dim> &p =
+            (subcells[c].size() == ref_to_subcell.size() ?
+               subcells[c][ref_to_subcell[j]] :
+               subcells[c][j]);
           
           spher_map_vector(j+0*fe->dofs_per_cell) = p(0);
           spher_map_vector(j+1*fe->dofs_per_cell) = p(1);
@@ -1023,10 +1030,15 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
 
       // compute subcell area
       double spher_subcell_area = 0.0;
-      if(quasi_sing_cell)
+      if(quasi_sing_cell || use_telles_cell)
       {
         //build FEValues with the Telles quadrature on this cell
         unsigned int n_telles = 8;
+        if (distance_to_singularity_ratio < 0.5)
+          n_telles = 16;
+        else if (distance_to_singularity_ratio < 1.0)
+          n_telles = 12;
+
         QTelles<dim-1> telles_quad(n_telles, qsing_to_use);
         FEValues<dim-1, dim> telles_fe_v(*mapping, 
                                           *fe, 
@@ -1160,8 +1172,6 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
 //      std::cout<<point<<std::endl;
 //    }
     
-    std::cout<<"# "<< cell<<" Int. spher: "<<spher_cell_area<<std::endl;
-    
     double cell_area = 0.0; 
     for (unsigned int q = 0; q < n_q_points; ++q)
     {
@@ -1173,7 +1183,31 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
       
       cell_area += dGGdn * fe_v.JxW(q);                  
     }
-    std::cout<<"# "<< cell<<" Int. cart: "<<cell_area<<std::endl;
+    const unsigned int cell_data_index = cell->active_cell_index();
+    const double       cartesian_contribution = -cell_area;
+    const double       denominator =
+      std::max(std::abs(cartesian_contribution), 1e-14);
+
+    cartesian_integral_per_cell[cell_data_index] = cartesian_contribution;
+    spherical_integral_per_cell[cell_data_index] = spher_cell_area;
+    absolute_error_per_cell[cell_data_index] =
+      std::abs(spher_cell_area - cartesian_contribution);
+    relative_error_per_cell[cell_data_index] =
+      absolute_error_per_cell[cell_data_index] / denominator;
+    quasi_singular_cell_flag[cell_data_index] = quasi_sing_cell ? 1.0 : 0.0;
+    singular_cell_flag[cell_data_index]       = sing_on_cell ? 1.0 : 0.0;
+    distance_to_singularity_over_cell_diameter[cell_data_index] =
+      std::isfinite(distance_to_singularity_ratio) ?
+        distance_to_singularity_ratio :
+        -1.0;
+    telles_order_per_cell[cell_data_index] =
+      (quasi_sing_cell || sing_on_cell) ?
+        (distance_to_singularity_ratio < 0.5 ?
+           16.0 :
+         distance_to_singularity_ratio < 1.0 ?
+           12.0 :
+           8.0) :
+        0.0;
     
     //1) obtain the spherical coordinates of all the cell dofs and the cell vertices
     //2) create a local triangulation with the one cell and cell vertices spherical coordinates
@@ -1201,8 +1235,124 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
 //  std::cout << "Area error estimators: " << area_error_L1 << " vs " << area_error_L2 << " vs " << area_error_relative_L2 << std::endl;
 //  std::cout << "Total area rel errors: " << std::abs(tot_area_cart-eval_area)/(eval_area) << "\t" << std::abs(tot_area_sph-eval_area)/(eval_area)<< std::endl;
 
-  std::cout<< "Integral cart: " << tot_area_cart << "    spher: " << tot_area_sph << "    correct: " << 0.5 << std::endl; 
-  std::cout<< "Rel errs cart: " << std::abs(-tot_area_cart-0.5)/0.5 << "    spher: " << std::abs(tot_area_sph-0.5)/0.5 << std::endl; 
+  relative_error_vs_smooth_field =
+    std::abs(tot_area_sph - 0.5) / 0.5;
+  relative_error_vs_geom_alpha_field =
+    std::abs(tot_area_sph - correct_geom_alpha) / correct_geom_alpha;
+
+  double max_absolute_cell_error  = 0.0;
+  double max_relative_cell_error  = 0.0;
+  double mean_absolute_cell_error = 0.0;
+  double mean_relative_cell_error = 0.0;
+  unsigned int n_quasi_singular_cells = 0;
+  unsigned int n_singular_cells       = 0;
+  unsigned int n_telles_8_cells       = 0;
+  unsigned int n_telles_12_cells      = 0;
+  unsigned int n_telles_16_cells      = 0;
+
+  for (unsigned int i = 0; i < absolute_error_per_cell.size(); ++i)
+    {
+      max_absolute_cell_error =
+        std::max(max_absolute_cell_error, absolute_error_per_cell[i]);
+      max_relative_cell_error =
+        std::max(max_relative_cell_error, relative_error_per_cell[i]);
+      mean_absolute_cell_error += absolute_error_per_cell[i];
+      mean_relative_cell_error += relative_error_per_cell[i];
+      n_quasi_singular_cells +=
+        (quasi_singular_cell_flag[i] > 0.5 ? 1u : 0u);
+      n_singular_cells += (singular_cell_flag[i] > 0.5 ? 1u : 0u);
+      n_telles_8_cells += (telles_order_per_cell[i] == 8.0 ? 1u : 0u);
+      n_telles_12_cells += (telles_order_per_cell[i] == 12.0 ? 1u : 0u);
+      n_telles_16_cells += (telles_order_per_cell[i] == 16.0 ? 1u : 0u);
+    }
+
+  if (absolute_error_per_cell.size() > 0)
+    {
+      mean_absolute_cell_error /= absolute_error_per_cell.size();
+      mean_relative_cell_error /= relative_error_per_cell.size();
+    }
+
+  const double cartesian_total = -tot_area_cart;
+  const double geom_denominator =
+    std::max(std::abs(correct_geom_alpha), 1e-14);
+  const double smooth_error = std::abs(tot_area_sph - 0.5) / 0.5;
+  const double geom_error =
+    std::abs(tot_area_sph - correct_geom_alpha) / geom_denominator;
+  const double cartesian_geom_error =
+    std::abs(cartesian_total - correct_geom_alpha) / geom_denominator;
+
+  pcout << "Spherical quadrature accuracy summary:" << std::endl
+        << "  target singularity: " << target_singularity << std::endl
+        << "  selected singularity: " << singularity << std::endl
+        << "  singular dof index: " << sing_index << std::endl
+        << "  smooth near-edge dof selected: "
+        << (found_smooth_near_edge_dof ? "true" : "false") << std::endl
+        << "  target selection distance: " << min_singularity_distance
+        << std::endl
+        << "  total cartesian integral: " << cartesian_total << std::endl
+        << "  total spherical integral: " << tot_area_sph << std::endl
+        << "  reference smooth alpha: " << 0.5 << std::endl
+        << "  reference geom_alpha: " << correct_geom_alpha << std::endl
+        << "  total rel error vs smooth: " << smooth_error << std::endl
+        << "  total rel error vs geom_alpha: " << geom_error << std::endl
+        << "  cartesian rel error vs geom_alpha: " << cartesian_geom_error
+        << std::endl
+        << "  mean cell rel error vs cartesian: "
+        << mean_relative_cell_error << std::endl
+        << "  max cell rel error vs cartesian: " << max_relative_cell_error
+        << std::endl
+        << "  mean cell abs error vs cartesian: "
+        << mean_absolute_cell_error << std::endl
+        << "  max cell abs error vs cartesian: " << max_absolute_cell_error
+        << std::endl
+        << "  quasi-singular cells: " << n_quasi_singular_cells
+        << std::endl
+        << "  singular cells: " << n_singular_cells << std::endl
+        << "  Telles cells by order: 8=" << n_telles_8_cells
+        << ", 12=" << n_telles_12_cells
+        << ", 16=" << n_telles_16_cells << std::endl;
+
+  if (this_mpi_process == 0)
+    {
+      DataOut<dim - 1, dim> dataout;
+      dataout.attach_dof_handler(dh);
+      dataout.add_data_vector(cartesian_integral_per_cell,
+                              "cartesian_integral",
+                              DataOut<dim - 1, dim>::type_cell_data);
+      dataout.add_data_vector(spherical_integral_per_cell,
+                              "spherical_integral",
+                              DataOut<dim - 1, dim>::type_cell_data);
+      dataout.add_data_vector(absolute_error_per_cell,
+                              "spherical_abs_error_vs_cartesian",
+                              DataOut<dim - 1, dim>::type_cell_data);
+      dataout.add_data_vector(relative_error_per_cell,
+                              "spherical_rel_error_vs_cartesian",
+                              DataOut<dim - 1, dim>::type_cell_data);
+      dataout.add_data_vector(quasi_singular_cell_flag,
+                              "is_quasi_singular_cell",
+                              DataOut<dim - 1, dim>::type_cell_data);
+      dataout.add_data_vector(singular_cell_flag,
+                              "is_singular_cell",
+                              DataOut<dim - 1, dim>::type_cell_data);
+      dataout.add_data_vector(distance_to_singularity_over_cell_diameter,
+                              "distance_to_singularity_over_cell_diameter",
+                              DataOut<dim - 1, dim>::type_cell_data);
+      dataout.add_data_vector(telles_order_per_cell,
+                              "telles_order",
+                              DataOut<dim - 1, dim>::type_cell_data);
+      dataout.add_data_vector(relative_error_vs_smooth_field,
+                              "total_rel_error_vs_smooth",
+                              DataOut<dim - 1, dim>::type_cell_data);
+      dataout.add_data_vector(relative_error_vs_geom_alpha_field,
+                              "total_rel_error_vs_geom_alpha",
+                              DataOut<dim - 1, dim>::type_cell_data);
+      dataout.build_patches(*mapping,
+                            mapping_degree,
+                            DataOut<dim - 1, dim>::curved_inner_cells);
+
+      std::ofstream file_error("spherical_quadrature_error.vtu");
+      dataout.write_vtu(file_error);
+    }
 return area;
 }
 
@@ -2224,12 +2374,6 @@ BEMProblem<dim>::compute_hypersingular_free_coeffs()
             }
           geom_alpha /= 4 * numbers::PI;
           hyp_alpha(i) = geom_alpha;
-
-          // just in case we need to check the code
-          pcout<<i<<"->      geom_alpha: "<<geom_alpha<<"  (" << support_points[i] << ")" << std::endl;
-          // "<<geom_alpha-alpha(i)<<endl; if (fabs(geom_alpha-alpha(i)) > 1e-3)
-          //   pcout<<"HELP!"<<endl;
-
 
           Tensor<2, dim> C_matrix;
           for (unsigned int d = 0; d < dim; ++d)
