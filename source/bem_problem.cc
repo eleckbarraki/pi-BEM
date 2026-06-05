@@ -11,6 +11,8 @@
 #include "../include/laplace_kernel.h"
 #include "../include/singular_kernel_integral.h"
 #include "../include/quasi_singular_kernel_integral.h"
+#include "../include/sinh_quadrature.h"
+#include "../include/subdivision_quadrature.h"
 #include "Teuchos_TimeMonitor.hpp"
 
 using Teuchos::RCP;
@@ -556,6 +558,10 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
 //  double error_sum_square_rel = 0.0;
   double tot_area_cart = 0.0;
   double tot_area_sph = 0.0;
+  double tot_area_sinh = 0.0;
+  double tot_area_subdivision = 0.0;
+  double tot_area_direct_spherical = 0.0;
+  double tot_area_hybrid = 0.0;
 
   // Choose a reproducible singularity close to a geometric edge. The closest
   // support point is selected so the test remains stable under refinement.
@@ -605,8 +611,42 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
 
   Vector<double> cartesian_integral_per_cell(dh.get_triangulation().n_active_cells());
   Vector<double> spherical_integral_per_cell(dh.get_triangulation().n_active_cells());
+  Vector<double> sinh_integral_per_cell(dh.get_triangulation().n_active_cells());
+  Vector<double> subdivision_integral_per_cell(
+    dh.get_triangulation().n_active_cells());
+  Vector<double> direct_spherical_integral_per_cell(
+    dh.get_triangulation().n_active_cells());
+  Vector<double> hybrid_integral_per_cell(
+    dh.get_triangulation().n_active_cells());
   Vector<double> absolute_error_per_cell(dh.get_triangulation().n_active_cells());
   Vector<double> relative_error_per_cell(dh.get_triangulation().n_active_cells());
+  Vector<double> sinh_absolute_error_per_cell(
+    dh.get_triangulation().n_active_cells());
+  Vector<double> sinh_relative_error_per_cell(
+    dh.get_triangulation().n_active_cells());
+  Vector<double> subdivision_absolute_error_per_cell(
+    dh.get_triangulation().n_active_cells());
+  Vector<double> subdivision_relative_error_per_cell(
+    dh.get_triangulation().n_active_cells());
+  Vector<double> direct_spherical_absolute_error_per_cell(
+    dh.get_triangulation().n_active_cells());
+  Vector<double> direct_spherical_relative_error_per_cell(
+    dh.get_triangulation().n_active_cells());
+  Vector<double> hybrid_absolute_error_per_cell(
+    dh.get_triangulation().n_active_cells());
+  Vector<double> hybrid_relative_error_per_cell(
+    dh.get_triangulation().n_active_cells());
+  Vector<double> sinh_abs_error_minus_telles_abs_error(
+    dh.get_triangulation().n_active_cells());
+  Vector<double> subdivision_abs_error_minus_telles_abs_error(
+    dh.get_triangulation().n_active_cells());
+  Vector<double> max_abs_error_cell_flag(dh.get_triangulation().n_active_cells());
+  Vector<double> spherical_reconstruction_error_per_cell(
+    dh.get_triangulation().n_active_cells());
+  Vector<double> spherical_area_jacobian_rel_error_per_cell(
+    dh.get_triangulation().n_active_cells());
+  Vector<double> spherical_normal_alignment_error_per_cell(
+    dh.get_triangulation().n_active_cells());
   Vector<double> quasi_singular_cell_flag(dh.get_triangulation().n_active_cells());
   Vector<double> singular_cell_flag(dh.get_triangulation().n_active_cells());
   Vector<double> distance_to_singularity_over_cell_diameter(
@@ -722,13 +762,8 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
           qsing_to_use[d] = std::max(0.0, std::min(1.0, qsing_to_use[d]));
         double dist_to_cell = qski.min_distance;
         distance_to_singularity_ratio = dist_to_cell / cell->diameter();
-        double dist_to_center = (singularity - cell->center()).norm();
-        //if(dist_to_cell < 4 * cell->diameter())
-        if(dist_to_center - 0.5*cell->diameter() < 0.1)
-        {
-          if(dist_to_cell < 0.3)       
-            quasi_sing_cell = true;
-        }  
+        if(distance_to_singularity_ratio < 2.0)
+          quasi_sing_cell = true;
       }
 
 //      // printing the cartesian points
@@ -946,6 +981,11 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
     } // end dim==3   
     
     double spher_cell_area = 0.0;
+    double sinh_cell_area  = 0.0;
+    double subdivision_cell_area = 0.0;
+    double max_spherical_reconstruction_error = 0.0;
+    double max_spherical_area_jacobian_rel_error = 0.0;
+    double max_spherical_normal_alignment_error = 0.0;
     for(unsigned int c = 0; c<subcells.size(); ++c)
     {  
       //2) create a one cell triangulation with the one cell and cell vertices spherical coordinates
@@ -1030,6 +1070,8 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
 
       // compute subcell area
       double spher_subcell_area = 0.0;
+      double sinh_subcell_area  = 0.0;
+      double subdivision_subcell_area = 0.0;
       if(quasi_sing_cell || use_telles_cell)
       {
         //build FEValues with the Telles quadrature on this cell
@@ -1059,6 +1101,61 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
           double dGdn = DD * telles_normals[q];
       
           spher_subcell_area += - dGdn * telles_fe_v.JxW(q);
+        }
+
+        QSinh<dim-1> sinh_quad(n_telles, qsing_to_use);
+        FEValues<dim-1, dim> sinh_fe_v(*mapping,
+                                        *fe,
+                                        sinh_quad,
+                                        update_values | update_gradients |
+                                        update_normal_vectors |
+                                        update_jacobians |
+                                        update_quadrature_points |
+                                        update_JxW_values);
+        sinh_fe_v.reinit(cell);
+        const unsigned int n_q_sinh = sinh_quad.size();
+        const std::vector<Point<dim>> &sinh_q_points =
+          sinh_fe_v.get_quadrature_points();
+        const std::vector<Tensor<1, dim>> &sinh_normals =
+          sinh_fe_v.get_normal_vectors();
+
+        for (unsigned int q = 0; q < n_q_sinh; ++q)
+        {
+          Tensor<1, dim> RR = sinh_q_points[q] - singularity;
+          Point<dim> DD;
+          double     ss;
+          LaplaceKernel::kernels(RR, DD, ss);
+          double dGdn = DD * sinh_normals[q];
+
+          sinh_subcell_area += -dGdn * sinh_fe_v.JxW(q);
+        }
+
+        QSubdivision<dim-1> subdivision_quad(n_telles, qsing_to_use);
+        FEValues<dim-1, dim> subdivision_fe_v(*mapping,
+                                               *fe,
+                                               subdivision_quad,
+                                               update_values |
+                                               update_gradients |
+                                               update_normal_vectors |
+                                               update_jacobians |
+                                               update_quadrature_points |
+                                               update_JxW_values);
+        subdivision_fe_v.reinit(cell);
+        const unsigned int n_q_subdivision = subdivision_quad.size();
+        const std::vector<Point<dim>> &subdivision_q_points =
+          subdivision_fe_v.get_quadrature_points();
+        const std::vector<Tensor<1, dim>> &subdivision_normals =
+          subdivision_fe_v.get_normal_vectors();
+
+        for (unsigned int q = 0; q < n_q_subdivision; ++q)
+        {
+          Tensor<1, dim> RR = subdivision_q_points[q] - singularity;
+          Point<dim> DD;
+          double     ss;
+          LaplaceKernel::kernels(RR, DD, ss);
+          double dGdn = DD * subdivision_normals[q];
+
+          subdivision_subcell_area += -dGdn * subdivision_fe_v.JxW(q);
         }
         
         // print quadrature nodes
@@ -1117,7 +1214,42 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
           dGdn = ( Js_inv_T_NN[0] * std::sin(theta) * std::cos(phi) + Js_inv_T_NN[1] * std::sin(theta) * std::sin(phi) + Js_inv_T_NN[2] * std::cos(theta) ) 
                           / (4*numbers::PI * r*r);
         
-          spher_subcell_area += dGdn * area_cell * quadrature->weight(q);       
+          spher_subcell_area += dGdn * area_cell * quadrature->weight(q);
+
+          Tensor<2, dim> RT;
+          if (sing_on_cell)
+            RT = transpose(Rotations[c]);
+          else if (quasi_sing_cell)
+            RT = transpose(QRotations[c]);
+          else
+            RT = Rots[c];
+
+          Point<dim> reconstructed_point;
+          reconstructed_point[0] = r * std::sin(theta) * std::cos(phi);
+          reconstructed_point[1] = r * std::sin(theta) * std::sin(phi);
+          reconstructed_point[2] = r * std::cos(theta);
+          reconstructed_point = RT * reconstructed_point;
+          reconstructed_point += translation;
+
+          max_spherical_reconstruction_error =
+            std::max(max_spherical_reconstruction_error,
+                     reconstructed_point.distance(q_points[q]));
+
+          const double original_area_weight = fe_v.JxW(q);
+          const double spherical_area_weight =
+            area_cell * quadrature->weight(q);
+          max_spherical_area_jacobian_rel_error =
+            std::max(max_spherical_area_jacobian_rel_error,
+                     std::abs(spherical_area_weight -
+                              original_area_weight) /
+                       std::max(std::abs(original_area_weight), 1e-14));
+
+          Tensor<1, dim> spherical_normal_original = RT * Js_inv_T_NN;
+          const double normal_alignment =
+            spherical_normal_original * normals[q];
+          max_spherical_normal_alignment_error =
+            std::max(max_spherical_normal_alignment_error,
+                     1.0 - std::abs(normal_alignment));
         } // end loop on quadrature nodes
         
         // print spherical quadrature points in cartesian cooridnates
@@ -1157,8 +1289,14 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
         }
         
       }// end else
-        
+      
       spher_cell_area += spher_subcell_area;
+      sinh_cell_area +=
+        (quasi_sing_cell || use_telles_cell) ? sinh_subcell_area :
+                                               spher_subcell_area;
+      subdivision_cell_area +=
+        (quasi_sing_cell || use_telles_cell) ? subdivision_subcell_area :
+                                               spher_subcell_area;
       // std::cout << "# Area of the subcell: " << spher_subcell_area << std::endl;  
       
     } //end loop subcells
@@ -1173,6 +1311,7 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
 //    }
     
     double cell_area = 0.0; 
+    double direct_spherical_cell_area = 0.0;
     for (unsigned int q = 0; q < n_q_points; ++q)
     {
       Tensor<1, dim> RR = q_points[q]-singularity; //distanza euclidea tra xq e x0;
@@ -1181,19 +1320,66 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
       LaplaceKernel::kernels(RR, DD, ss);
       double dGGdn = DD * normals[q];
       
-      cell_area += dGGdn * fe_v.JxW(q);                  
+      cell_area += dGGdn * fe_v.JxW(q);
+
+      const double r = RR.norm();
+      if (r > 1e-14)
+        {
+          const Tensor<1, dim> radial_direction = RR / r;
+          const double direct_dGdn =
+            (normals[q] * radial_direction) /
+            (4.0 * numbers::PI * r * r);
+          direct_spherical_cell_area += direct_dGdn * fe_v.JxW(q);
+        }
     }
     const unsigned int cell_data_index = cell->active_cell_index();
     const double       cartesian_contribution = -cell_area;
     const double       denominator =
       std::max(std::abs(cartesian_contribution), 1e-14);
+    const double       hybrid_cell_area =
+      (quasi_sing_cell || sing_on_cell) ? subdivision_cell_area :
+                                          direct_spherical_cell_area;
 
     cartesian_integral_per_cell[cell_data_index] = cartesian_contribution;
     spherical_integral_per_cell[cell_data_index] = spher_cell_area;
+    sinh_integral_per_cell[cell_data_index]      = sinh_cell_area;
+    subdivision_integral_per_cell[cell_data_index] =
+      subdivision_cell_area;
+    direct_spherical_integral_per_cell[cell_data_index] =
+      direct_spherical_cell_area;
+    hybrid_integral_per_cell[cell_data_index] = hybrid_cell_area;
     absolute_error_per_cell[cell_data_index] =
       std::abs(spher_cell_area - cartesian_contribution);
     relative_error_per_cell[cell_data_index] =
       absolute_error_per_cell[cell_data_index] / denominator;
+    sinh_absolute_error_per_cell[cell_data_index] =
+      std::abs(sinh_cell_area - cartesian_contribution);
+    sinh_relative_error_per_cell[cell_data_index] =
+      sinh_absolute_error_per_cell[cell_data_index] / denominator;
+    subdivision_absolute_error_per_cell[cell_data_index] =
+      std::abs(subdivision_cell_area - cartesian_contribution);
+    subdivision_relative_error_per_cell[cell_data_index] =
+      subdivision_absolute_error_per_cell[cell_data_index] / denominator;
+    direct_spherical_absolute_error_per_cell[cell_data_index] =
+      std::abs(direct_spherical_cell_area - cartesian_contribution);
+    direct_spherical_relative_error_per_cell[cell_data_index] =
+      direct_spherical_absolute_error_per_cell[cell_data_index] / denominator;
+    hybrid_absolute_error_per_cell[cell_data_index] =
+      std::abs(hybrid_cell_area - cartesian_contribution);
+    hybrid_relative_error_per_cell[cell_data_index] =
+      hybrid_absolute_error_per_cell[cell_data_index] / denominator;
+    sinh_abs_error_minus_telles_abs_error[cell_data_index] =
+      sinh_absolute_error_per_cell[cell_data_index] -
+      absolute_error_per_cell[cell_data_index];
+    subdivision_abs_error_minus_telles_abs_error[cell_data_index] =
+      subdivision_absolute_error_per_cell[cell_data_index] -
+      absolute_error_per_cell[cell_data_index];
+    spherical_reconstruction_error_per_cell[cell_data_index] =
+      max_spherical_reconstruction_error;
+    spherical_area_jacobian_rel_error_per_cell[cell_data_index] =
+      max_spherical_area_jacobian_rel_error;
+    spherical_normal_alignment_error_per_cell[cell_data_index] =
+      max_spherical_normal_alignment_error;
     quasi_singular_cell_flag[cell_data_index] = quasi_sing_cell ? 1.0 : 0.0;
     singular_cell_flag[cell_data_index]       = sing_on_cell ? 1.0 : 0.0;
     distance_to_singularity_over_cell_diameter[cell_data_index] =
@@ -1224,6 +1410,10 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
 //      ++n_cells;
       tot_area_cart += cell_area;
       tot_area_sph += spher_cell_area;
+      tot_area_sinh += sinh_cell_area;
+      tot_area_subdivision += subdivision_cell_area;
+      tot_area_direct_spherical += direct_spherical_cell_area;
+      tot_area_hybrid += hybrid_cell_area;
     }
      
   }
@@ -1244,20 +1434,96 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
   double max_relative_cell_error  = 0.0;
   double mean_absolute_cell_error = 0.0;
   double mean_relative_cell_error = 0.0;
+  double max_sinh_absolute_cell_error  = 0.0;
+  double max_sinh_relative_cell_error  = 0.0;
+  double mean_sinh_absolute_cell_error = 0.0;
+  double mean_sinh_relative_cell_error = 0.0;
+  double max_subdivision_absolute_cell_error  = 0.0;
+  double max_subdivision_relative_cell_error  = 0.0;
+  double mean_subdivision_absolute_cell_error = 0.0;
+  double mean_subdivision_relative_cell_error = 0.0;
+  double max_direct_spherical_absolute_cell_error  = 0.0;
+  double max_direct_spherical_relative_cell_error  = 0.0;
+  double mean_direct_spherical_absolute_cell_error = 0.0;
+  double mean_direct_spherical_relative_cell_error = 0.0;
+  double max_hybrid_absolute_cell_error  = 0.0;
+  double max_hybrid_relative_cell_error  = 0.0;
+  double mean_hybrid_absolute_cell_error = 0.0;
+  double mean_hybrid_relative_cell_error = 0.0;
+  double max_spherical_reconstruction_error = 0.0;
+  double max_spherical_area_jacobian_rel_error = 0.0;
+  double max_spherical_normal_alignment_error = 0.0;
   unsigned int n_quasi_singular_cells = 0;
   unsigned int n_singular_cells       = 0;
   unsigned int n_telles_8_cells       = 0;
   unsigned int n_telles_12_cells      = 0;
   unsigned int n_telles_16_cells      = 0;
+  unsigned int max_telles_abs_error_cell_index      = 0;
+  unsigned int max_sinh_abs_error_cell_index        = 0;
+  unsigned int max_subdivision_abs_error_cell_index = 0;
 
   for (unsigned int i = 0; i < absolute_error_per_cell.size(); ++i)
     {
-      max_absolute_cell_error =
-        std::max(max_absolute_cell_error, absolute_error_per_cell[i]);
+      if (absolute_error_per_cell[i] > max_absolute_cell_error)
+        {
+          max_absolute_cell_error          = absolute_error_per_cell[i];
+          max_telles_abs_error_cell_index = i;
+        }
       max_relative_cell_error =
         std::max(max_relative_cell_error, relative_error_per_cell[i]);
       mean_absolute_cell_error += absolute_error_per_cell[i];
       mean_relative_cell_error += relative_error_per_cell[i];
+      if (sinh_absolute_error_per_cell[i] > max_sinh_absolute_cell_error)
+        {
+          max_sinh_absolute_cell_error = sinh_absolute_error_per_cell[i];
+          max_sinh_abs_error_cell_index = i;
+        }
+      max_sinh_relative_cell_error =
+        std::max(max_sinh_relative_cell_error,
+                 sinh_relative_error_per_cell[i]);
+      mean_sinh_absolute_cell_error += sinh_absolute_error_per_cell[i];
+      mean_sinh_relative_cell_error += sinh_relative_error_per_cell[i];
+      if (subdivision_absolute_error_per_cell[i] >
+          max_subdivision_absolute_cell_error)
+        {
+          max_subdivision_absolute_cell_error =
+            subdivision_absolute_error_per_cell[i];
+          max_subdivision_abs_error_cell_index = i;
+        }
+      max_subdivision_relative_cell_error =
+        std::max(max_subdivision_relative_cell_error,
+                 subdivision_relative_error_per_cell[i]);
+      mean_subdivision_absolute_cell_error +=
+        subdivision_absolute_error_per_cell[i];
+      mean_subdivision_relative_cell_error +=
+        subdivision_relative_error_per_cell[i];
+      max_direct_spherical_absolute_cell_error =
+        std::max(max_direct_spherical_absolute_cell_error,
+                 direct_spherical_absolute_error_per_cell[i]);
+      max_direct_spherical_relative_cell_error =
+        std::max(max_direct_spherical_relative_cell_error,
+                 direct_spherical_relative_error_per_cell[i]);
+      mean_direct_spherical_absolute_cell_error +=
+        direct_spherical_absolute_error_per_cell[i];
+      mean_direct_spherical_relative_cell_error +=
+        direct_spherical_relative_error_per_cell[i];
+      max_hybrid_absolute_cell_error =
+        std::max(max_hybrid_absolute_cell_error,
+                 hybrid_absolute_error_per_cell[i]);
+      max_hybrid_relative_cell_error =
+        std::max(max_hybrid_relative_cell_error,
+                 hybrid_relative_error_per_cell[i]);
+      mean_hybrid_absolute_cell_error += hybrid_absolute_error_per_cell[i];
+      mean_hybrid_relative_cell_error += hybrid_relative_error_per_cell[i];
+      max_spherical_reconstruction_error =
+        std::max(max_spherical_reconstruction_error,
+                 spherical_reconstruction_error_per_cell[i]);
+      max_spherical_area_jacobian_rel_error =
+        std::max(max_spherical_area_jacobian_rel_error,
+                 spherical_area_jacobian_rel_error_per_cell[i]);
+      max_spherical_normal_alignment_error =
+        std::max(max_spherical_normal_alignment_error,
+                 spherical_normal_alignment_error_per_cell[i]);
       n_quasi_singular_cells +=
         (quasi_singular_cell_flag[i] > 0.5 ? 1u : 0u);
       n_singular_cells += (singular_cell_flag[i] > 0.5 ? 1u : 0u);
@@ -1266,10 +1532,26 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
       n_telles_16_cells += (telles_order_per_cell[i] == 16.0 ? 1u : 0u);
     }
 
+  max_abs_error_cell_flag[max_telles_abs_error_cell_index]      = 1.0;
+  max_abs_error_cell_flag[max_sinh_abs_error_cell_index]        = 1.0;
+  max_abs_error_cell_flag[max_subdivision_abs_error_cell_index] = 1.0;
+
   if (absolute_error_per_cell.size() > 0)
     {
       mean_absolute_cell_error /= absolute_error_per_cell.size();
       mean_relative_cell_error /= relative_error_per_cell.size();
+      mean_sinh_absolute_cell_error /= sinh_absolute_error_per_cell.size();
+      mean_sinh_relative_cell_error /= sinh_relative_error_per_cell.size();
+      mean_subdivision_absolute_cell_error /=
+        subdivision_absolute_error_per_cell.size();
+      mean_subdivision_relative_cell_error /=
+        subdivision_relative_error_per_cell.size();
+      mean_direct_spherical_absolute_cell_error /=
+        direct_spherical_absolute_error_per_cell.size();
+      mean_direct_spherical_relative_cell_error /=
+        direct_spherical_relative_error_per_cell.size();
+      mean_hybrid_absolute_cell_error /= hybrid_absolute_error_per_cell.size();
+      mean_hybrid_relative_cell_error /= hybrid_relative_error_per_cell.size();
     }
 
   const double cartesian_total = -tot_area_cart;
@@ -1278,8 +1560,70 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
   const double smooth_error = std::abs(tot_area_sph - 0.5) / 0.5;
   const double geom_error =
     std::abs(tot_area_sph - correct_geom_alpha) / geom_denominator;
+  const double sinh_smooth_error =
+    std::abs(tot_area_sinh - 0.5) / 0.5;
+  const double sinh_geom_error =
+    std::abs(tot_area_sinh - correct_geom_alpha) / geom_denominator;
+  const double subdivision_smooth_error =
+    std::abs(tot_area_subdivision - 0.5) / 0.5;
+  const double subdivision_geom_error =
+    std::abs(tot_area_subdivision - correct_geom_alpha) / geom_denominator;
+  const double direct_spherical_smooth_error =
+    std::abs(tot_area_direct_spherical - 0.5) / 0.5;
+  const double direct_spherical_geom_error =
+    std::abs(tot_area_direct_spherical - correct_geom_alpha) /
+    geom_denominator;
+  const double hybrid_smooth_error =
+    std::abs(tot_area_hybrid - 0.5) / 0.5;
+  const double hybrid_geom_error =
+    std::abs(tot_area_hybrid - correct_geom_alpha) / geom_denominator;
   const double cartesian_geom_error =
     std::abs(cartesian_total - correct_geom_alpha) / geom_denominator;
+
+  auto print_cell_error_details = [&](const std::string &label,
+                                      const unsigned int index) {
+    pcout << "  " << label << " max abs error cell:" << std::endl
+          << "    cell index: " << index << std::endl
+          << "    cartesian integral: " << cartesian_integral_per_cell[index]
+          << std::endl
+          << "    Telles integral: " << spherical_integral_per_cell[index]
+          << std::endl
+          << "    sinh integral: " << sinh_integral_per_cell[index]
+          << std::endl
+          << "    subdivision integral: "
+          << subdivision_integral_per_cell[index] << std::endl
+          << "    direct spherical integral: "
+          << direct_spherical_integral_per_cell[index] << std::endl
+          << "    hybrid integral: " << hybrid_integral_per_cell[index]
+          << std::endl
+          << "    Telles abs error: " << absolute_error_per_cell[index]
+          << std::endl
+          << "    sinh abs error: " << sinh_absolute_error_per_cell[index]
+          << std::endl
+          << "    subdivision abs error: "
+          << subdivision_absolute_error_per_cell[index] << std::endl
+          << "    direct spherical abs error: "
+          << direct_spherical_absolute_error_per_cell[index] << std::endl
+          << "    hybrid abs error: " << hybrid_absolute_error_per_cell[index]
+          << std::endl
+          << "    is singular: "
+          << (singular_cell_flag[index] > 0.5 ? "true" : "false")
+          << std::endl
+          << "    is quasi singular: "
+          << (quasi_singular_cell_flag[index] > 0.5 ? "true" : "false")
+          << std::endl
+          << "    distance/cell diameter: "
+          << distance_to_singularity_over_cell_diameter[index] << std::endl
+          << "    Telles order: " << telles_order_per_cell[index]
+          << std::endl
+          << "    spherical reconstruction error: "
+          << spherical_reconstruction_error_per_cell[index] << std::endl
+          << "    spherical area Jacobian rel error: "
+          << spherical_area_jacobian_rel_error_per_cell[index] << std::endl
+          << "    spherical normal alignment error: "
+          << spherical_normal_alignment_error_per_cell[index]
+          << std::endl;
+  };
 
   pcout << "Spherical quadrature accuracy summary:" << std::endl
         << "  target singularity: " << target_singularity << std::endl
@@ -1290,27 +1634,112 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
         << "  target selection distance: " << min_singularity_distance
         << std::endl
         << "  total cartesian integral: " << cartesian_total << std::endl
-        << "  total spherical integral: " << tot_area_sph << std::endl
+        << "  total spherical integral (Telles): " << tot_area_sph
+        << std::endl
+        << "  total sinh integral: " << tot_area_sinh << std::endl
+        << "  total subdivision integral: " << tot_area_subdivision
+        << std::endl
+        << "  total direct spherical integral: "
+        << tot_area_direct_spherical << std::endl
+        << "  total hybrid integral: " << tot_area_hybrid << std::endl
         << "  reference smooth alpha: " << 0.5 << std::endl
         << "  reference geom_alpha: " << correct_geom_alpha << std::endl
-        << "  total rel error vs smooth: " << smooth_error << std::endl
-        << "  total rel error vs geom_alpha: " << geom_error << std::endl
+        << "  Telles total rel error vs smooth: " << smooth_error
+        << std::endl
+        << "  Telles total rel error vs geom_alpha: " << geom_error
+        << std::endl
+        << "  sinh total rel error vs smooth: " << sinh_smooth_error
+        << std::endl
+        << "  sinh total rel error vs geom_alpha: " << sinh_geom_error
+        << std::endl
+        << "  subdivision total rel error vs smooth: "
+        << subdivision_smooth_error
+        << std::endl
+        << "  subdivision total rel error vs geom_alpha: "
+        << subdivision_geom_error
+        << std::endl
+        << "  direct spherical total rel error vs smooth: "
+        << direct_spherical_smooth_error
+        << std::endl
+        << "  direct spherical total rel error vs geom_alpha: "
+        << direct_spherical_geom_error
+        << std::endl
+        << "  hybrid total rel error vs smooth: " << hybrid_smooth_error
+        << std::endl
+        << "  hybrid total rel error vs geom_alpha: " << hybrid_geom_error
+        << std::endl
         << "  cartesian rel error vs geom_alpha: " << cartesian_geom_error
         << std::endl
-        << "  mean cell rel error vs cartesian: "
+        << "  Telles mean cell rel error vs cartesian: "
         << mean_relative_cell_error << std::endl
-        << "  max cell rel error vs cartesian: " << max_relative_cell_error
+        << "  Telles max cell rel error vs cartesian: "
+        << max_relative_cell_error
         << std::endl
-        << "  mean cell abs error vs cartesian: "
+        << "  Telles mean cell abs error vs cartesian: "
         << mean_absolute_cell_error << std::endl
-        << "  max cell abs error vs cartesian: " << max_absolute_cell_error
+        << "  Telles max cell abs error vs cartesian: "
+        << max_absolute_cell_error
+        << std::endl
+        << "  sinh mean cell rel error vs cartesian: "
+        << mean_sinh_relative_cell_error << std::endl
+        << "  sinh max cell rel error vs cartesian: "
+        << max_sinh_relative_cell_error
+        << std::endl
+        << "  sinh mean cell abs error vs cartesian: "
+        << mean_sinh_absolute_cell_error << std::endl
+        << "  sinh max cell abs error vs cartesian: "
+        << max_sinh_absolute_cell_error
+        << std::endl
+        << "  subdivision mean cell rel error vs cartesian: "
+        << mean_subdivision_relative_cell_error << std::endl
+        << "  subdivision max cell rel error vs cartesian: "
+        << max_subdivision_relative_cell_error
+        << std::endl
+        << "  subdivision mean cell abs error vs cartesian: "
+        << mean_subdivision_absolute_cell_error << std::endl
+        << "  subdivision max cell abs error vs cartesian: "
+        << max_subdivision_absolute_cell_error
+        << std::endl
+        << "  direct spherical mean cell rel error vs cartesian: "
+        << mean_direct_spherical_relative_cell_error << std::endl
+        << "  direct spherical max cell rel error vs cartesian: "
+        << max_direct_spherical_relative_cell_error
+        << std::endl
+        << "  direct spherical mean cell abs error vs cartesian: "
+        << mean_direct_spherical_absolute_cell_error << std::endl
+        << "  direct spherical max cell abs error vs cartesian: "
+        << max_direct_spherical_absolute_cell_error
+        << std::endl
+        << "  hybrid mean cell rel error vs cartesian: "
+        << mean_hybrid_relative_cell_error << std::endl
+        << "  hybrid max cell rel error vs cartesian: "
+        << max_hybrid_relative_cell_error
+        << std::endl
+        << "  hybrid mean cell abs error vs cartesian: "
+        << mean_hybrid_absolute_cell_error << std::endl
+        << "  hybrid max cell abs error vs cartesian: "
+        << max_hybrid_absolute_cell_error
         << std::endl
         << "  quasi-singular cells: " << n_quasi_singular_cells
         << std::endl
         << "  singular cells: " << n_singular_cells << std::endl
         << "  Telles cells by order: 8=" << n_telles_8_cells
         << ", 12=" << n_telles_12_cells
-        << ", 16=" << n_telles_16_cells << std::endl;
+        << ", 16=" << n_telles_16_cells << std::endl
+        << "  max spherical reconstruction error: "
+        << max_spherical_reconstruction_error << std::endl
+        << "  max spherical area Jacobian rel error: "
+        << max_spherical_area_jacobian_rel_error << std::endl
+        << "  max spherical normal alignment error: "
+        << max_spherical_normal_alignment_error << std::endl;
+
+  print_cell_error_details("Telles", max_telles_abs_error_cell_index);
+  if (max_sinh_abs_error_cell_index != max_telles_abs_error_cell_index)
+    print_cell_error_details("sinh", max_sinh_abs_error_cell_index);
+  if (max_subdivision_abs_error_cell_index != max_telles_abs_error_cell_index &&
+      max_subdivision_abs_error_cell_index != max_sinh_abs_error_cell_index)
+    print_cell_error_details("subdivision",
+                             max_subdivision_abs_error_cell_index);
 
   if (this_mpi_process == 0)
     {
@@ -1322,11 +1751,65 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
       dataout.add_data_vector(spherical_integral_per_cell,
                               "spherical_integral",
                               DataOut<dim - 1, dim>::type_cell_data);
+      dataout.add_data_vector(sinh_integral_per_cell,
+                              "sinh_integral",
+                              DataOut<dim - 1, dim>::type_cell_data);
+      dataout.add_data_vector(subdivision_integral_per_cell,
+                              "subdivision_integral",
+                              DataOut<dim - 1, dim>::type_cell_data);
+      dataout.add_data_vector(direct_spherical_integral_per_cell,
+                              "direct_spherical_integral",
+                              DataOut<dim - 1, dim>::type_cell_data);
+      dataout.add_data_vector(hybrid_integral_per_cell,
+                              "hybrid_integral",
+                              DataOut<dim - 1, dim>::type_cell_data);
       dataout.add_data_vector(absolute_error_per_cell,
                               "spherical_abs_error_vs_cartesian",
                               DataOut<dim - 1, dim>::type_cell_data);
       dataout.add_data_vector(relative_error_per_cell,
                               "spherical_rel_error_vs_cartesian",
+                              DataOut<dim - 1, dim>::type_cell_data);
+      dataout.add_data_vector(sinh_absolute_error_per_cell,
+                              "sinh_abs_error_vs_cartesian",
+                              DataOut<dim - 1, dim>::type_cell_data);
+      dataout.add_data_vector(sinh_relative_error_per_cell,
+                              "sinh_rel_error_vs_cartesian",
+                              DataOut<dim - 1, dim>::type_cell_data);
+      dataout.add_data_vector(subdivision_absolute_error_per_cell,
+                              "subdivision_abs_error_vs_cartesian",
+                              DataOut<dim - 1, dim>::type_cell_data);
+      dataout.add_data_vector(subdivision_relative_error_per_cell,
+                              "subdivision_rel_error_vs_cartesian",
+                              DataOut<dim - 1, dim>::type_cell_data);
+      dataout.add_data_vector(direct_spherical_absolute_error_per_cell,
+                              "direct_spherical_abs_error_vs_cartesian",
+                              DataOut<dim - 1, dim>::type_cell_data);
+      dataout.add_data_vector(direct_spherical_relative_error_per_cell,
+                              "direct_spherical_rel_error_vs_cartesian",
+                              DataOut<dim - 1, dim>::type_cell_data);
+      dataout.add_data_vector(hybrid_absolute_error_per_cell,
+                              "hybrid_abs_error_vs_cartesian",
+                              DataOut<dim - 1, dim>::type_cell_data);
+      dataout.add_data_vector(hybrid_relative_error_per_cell,
+                              "hybrid_rel_error_vs_cartesian",
+                              DataOut<dim - 1, dim>::type_cell_data);
+      dataout.add_data_vector(sinh_abs_error_minus_telles_abs_error,
+                              "sinh_abs_error_minus_telles_abs_error",
+                              DataOut<dim - 1, dim>::type_cell_data);
+      dataout.add_data_vector(subdivision_abs_error_minus_telles_abs_error,
+                              "subdivision_abs_error_minus_telles_abs_error",
+                              DataOut<dim - 1, dim>::type_cell_data);
+      dataout.add_data_vector(max_abs_error_cell_flag,
+                              "is_max_abs_error_cell",
+                              DataOut<dim - 1, dim>::type_cell_data);
+      dataout.add_data_vector(spherical_reconstruction_error_per_cell,
+                              "spherical_reconstruction_error",
+                              DataOut<dim - 1, dim>::type_cell_data);
+      dataout.add_data_vector(spherical_area_jacobian_rel_error_per_cell,
+                              "spherical_area_jacobian_rel_error",
+                              DataOut<dim - 1, dim>::type_cell_data);
+      dataout.add_data_vector(spherical_normal_alignment_error_per_cell,
+                              "spherical_normal_alignment_error",
                               DataOut<dim - 1, dim>::type_cell_data);
       dataout.add_data_vector(quasi_singular_cell_flag,
                               "is_quasi_singular_cell",
