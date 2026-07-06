@@ -142,6 +142,12 @@ public:
 
   const Quadrature<dim - 1> &
   get_singular_quadrature(const unsigned int index) const;
+  
+  const Quadrature<dim - 1>
+  get_quasi_singular_quadrature(const typename DoFHandler<dim-1,dim>::active_cell_iterator &cell,
+                                const Mapping<dim-1,dim> &mapping,
+                                const Point<dim> &singularity,
+                                const Point<dim-1> &ref_projection) const;
 
   /// This function compute a very specific case, a double node that has a
   /// dirichlet-dirichlet condition. In this case there is a constraint for
@@ -291,8 +297,6 @@ public:
 
   void
   adaptive_refinement(const TrilinosWrappers::MPI::Vector &error_vector);
-  
-  double compute_boundary_area_with_spherical_coordinates();
 
 
 

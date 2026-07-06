@@ -421,1266 +421,6 @@ BEMProblem<dim>::reinit()
     b_i[i].reinit(this_cpu_set, mpi_communicator);
 }
 
-// rotate a cell and check validity of triangles
-namespace
-{
-  // rotate the cell
-  template <int dim>
-  void rotate_cell(const typename DoFHandler<dim-1, dim>::active_cell_iterator &cell, 
-                    const std::vector<Point<dim>> &support_points_local, 
-                    const Point<dim> &singularity,std::vector<Point<dim>> &rotated_points, 
-                    Point<dim> &rotated_singularity,
-                    Tensor<2,dim> &rotation_matrix)
-  {
-    const unsigned int n = support_points_local.size();
-    if (rotated_points.size() != n)
-      rotated_points.resize(n);
-    
-    // compute middle point of the cell  
-    Point<dim> P = cell->center();
-//    for (unsigned int i = 0; i < n; ++i)
-//      P += support_points_local[i];
-//    P /= n;
-    
-    // compute the new y-axis direction: u = -(P - O)/|P - O| 
-    const Point<dim> &S = singularity;
-    const double norm_PS = (P-S).norm();
-    AssertThrow(norm_PS > 1e-14, ExcMessage("Cell midpoint at origin: undefined rotation direction."));
-    Tensor<1,dim> u = -(P-S) / norm_PS; // new y-axis (unit)
-
-    // choose a vector not parallel to u
-    Tensor<1,dim> a;
-    a[0] = 0; a[1] = 1; a[2] = 0;   // original y
-    Tensor<1,dim> cross_au = cross_product_3d(a,u);
-    if (cross_au.norm() < 1e-8)
-    {
-      a[0] = 0; a[1] = 0; a[2] = 1;   // if u is nearly parallel to y, use z
-    }
-
-    // compute orthonormal basis (v,u,w)
-    Tensor<1,dim> v = cross_product_3d(a,u);
-    v /= v.norm(); // new x-axis
-    Tensor<1,dim> w = cross_product_3d(v,u); // new z-axis (already unit)
-
-    // build rotation matrix E = [v u w]
-    Tensor<2,dim> E;
-    for (unsigned int i=0; i < dim; ++i)
-    {
-      E[i][0] = v[i];
-      E[i][1] = u[i];
-      E[i][2] = w[i];
-    }
-    rotation_matrix = E;
-
-    // rotate cell dofs
-    for (unsigned int i=0; i < n; ++i)
-    {
-      const Point<dim> &X = support_points_local[i];
-      Point<dim> Xnew;
-      for (unsigned int k=0; k<dim; ++k)
-      {
-        Xnew[k] = 0.0;
-        for (unsigned int j=0; j<dim; ++j)
-          Xnew[k] += E[j][k] * (X[j]-S[j]); // E oppure Et?
-      }
-      rotated_points[i] = Xnew; 
-    }
-    
-    // rotate also singularity
-    
-    Point<dim> Snew;
-    for (unsigned int k=0; k<dim; ++k)
-    {
-      Snew[k] = 0.0;
-//      for (unsigned int j=0; j<dim; ++j)
-//        Snew[k] += E[j][k] * S[j];
-    }
-    rotated_singularity = Snew;
-  
-    return;
-  }
-  
-  
-  //check if the triangle is valid
-  template <int dim>
-  bool triangle_is_valid(const std::vector<Point<dim>> &v, double tol=1e-12)
-  {
-    // coincident points
-    if ((v[1]-v[0]).norm() < tol) return false;
-    if ((v[2]-v[0]).norm() < tol) return false;
-    if ((v[2]-v[1]).norm() < tol) return false;
-
-    // collinearity
-    Tensor<1,dim> a = v[1] - v[0];
-    Tensor<1,dim> b = v[2] - v[0];
-    
-    double area_tria;
-    
-    if(dim==2)
-      area_tria = std::abs(a[0]*b[1] - a[1]*b[0]);
-    else if(dim==3)
-      area_tria = cross_product_3d(a, b).norm();
-    else
-      AssertThrow(false, ExcNotImplemented());
-    
-    return area_tria >= tol;
-  }
-  
-}
-
-// Compute α(x) by integrating dG/dn over the entire boundary with respect
-// to the dof x.
-//
-// Compare the results obtained using:
-//   - Spherical quadrature,
-//   - Telles quadrature,
-//   - Sinh quadrature,
-//   - Subdivision quadrature.
-//
-//For singular cells, use the QDuffy in the Telles, sinh and
-//subdivision approaches.
-
-// Spherical quadrature layout:
-//1) obtain the spherical coordinates of all the cell dofs and the cell vertices
-//2) create a local triangulation with the one cell and cell vertices spherical coordinates
-//3) create a dh on the new local tria
-//4) use the local dofs coordinate for the local mapping on the new tria/dh
-//5) create and FEValues on the new dh
-
-template <int dim>
-double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
-{
-  std::ofstream file("quadrature_points.csv", std::ios::out | std::ios::trunc);
-  file << "x y z" << "\n";
-  double area = 0.0;
-
-  FEValues<dim - 1, dim> fe_v(*mapping,
-                              *fe,
-                              *quadrature,
-                              update_values | update_normal_vectors |
-                                update_quadrature_points | update_JxW_values);
-  const unsigned int n_q_points = fe_v.n_quadrature_points;
-
-  std::vector<types::global_dof_index> local_dof_indices(fe->dofs_per_cell);
-  std::vector<Point<dim>> support_points(dh.n_dofs());
-  DoFTools::map_dofs_to_support_points<dim - 1, dim>(*mapping,
-                                                     dh,
-                                                     support_points);                                                  
-
-  cell_it cell = dh.begin_active(), endc = dh.end();
-  
-  double tot_area_cart = 0.0;
-  double tot_area_sph = 0.0;
-  double tot_area_sinh = 0.0;
-  double tot_area_subdivision = 0.0;
-  double tot_area_telles = 0.0;
-
-  // Choose a reproducible singularity close to a geometric edge. The closest
-  // support point is selected so the test remains stable under refinement.
-  // singularity4: (0.96875, 0.0605469, 0.00625);
-  // singularity5: (0.984375, 0.0307617, 0.003125);
-  Point<dim> target_singularity;
-  if (dim == 3)
-    target_singularity = Point<dim>(0.96875, 0.0605469, 0.00625);
-  else if (dim == 2)
-    target_singularity = Point<dim>(0.625, 0.04);
-
-  const Vector<double> localized_hyp_alpha(hyp_alpha);
-  // hyp_aplha is the free coeff computed with mantich formula
-
-  types::global_dof_index sing_index = 0;
-  double min_singularity_distance =  std::numeric_limits<double>::max();
-  bool found_smooth_near_edge_dof = false;
-
-  for (types::global_dof_index i = 0; i < support_points.size(); ++i)
-  {
-    const double distance = support_points[i].distance(target_singularity);
-    if (distance < min_singularity_distance)
-    {
-      min_singularity_distance = distance;
-      sing_index               = i;
-      found_smooth_near_edge_dof = true;
-    }
-  }
-
-  Point<dim> singularity = support_points[sing_index];
-  const double correct_geom_alpha = localized_hyp_alpha[sing_index];
-
-  // initialise quantities of interest
-  Vector<double> cartesian_integral_per_cell(dh.get_triangulation().n_active_cells());
-  Vector<double> spherical_integral_per_cell(dh.get_triangulation().n_active_cells());
-  Vector<double> telles_integral_per_cell(dh.get_triangulation().n_active_cells());
-  Vector<double> sinh_integral_per_cell(dh.get_triangulation().n_active_cells());
-  Vector<double> subdivision_integral_per_cell(dh.get_triangulation().n_active_cells());
-  
-  Vector<double> absolute_error_per_cell(dh.get_triangulation().n_active_cells());
-  Vector<double> relative_error_per_cell(dh.get_triangulation().n_active_cells());
-  Vector<double> telles_absolute_error_per_cell(dh.get_triangulation().n_active_cells());
-  Vector<double> telles_relative_error_per_cell(dh.get_triangulation().n_active_cells());
-  Vector<double> sinh_absolute_error_per_cell(dh.get_triangulation().n_active_cells());
-  Vector<double> sinh_relative_error_per_cell(dh.get_triangulation().n_active_cells());
-  Vector<double> subdivision_absolute_error_per_cell(dh.get_triangulation().n_active_cells());
-  Vector<double> subdivision_relative_error_per_cell(dh.get_triangulation().n_active_cells());
-  
-  Vector<double> sinh_abs_error_minus_telles_abs_error(dh.get_triangulation().n_active_cells());
-  Vector<double> subdivision_abs_error_minus_telles_abs_error(dh.get_triangulation().n_active_cells());
-  Vector<double> max_abs_error_cell_flag(dh.get_triangulation().n_active_cells());
-  Vector<double> spherical_normal_alignment_error_per_cell(dh.get_triangulation().n_active_cells());
-  
-  Vector<double> quasi_singular_cell_flag(dh.get_triangulation().n_active_cells());
-  Vector<double> singular_cell_flag(dh.get_triangulation().n_active_cells());
-  
-  Vector<double> distance_to_singularity_over_cell_diameter(dh.get_triangulation().n_active_cells());
-  
-  Vector<double> relative_error_vs_smooth_field(dh.get_triangulation().n_active_cells());
-  Vector<double> relative_error_vs_geom_alpha_field(dh.get_triangulation().n_active_cells());
-
-  // loop on cells
-  for (cell = dh.begin_active(); cell != endc; ++cell)
-  {
-    fe_v.reinit(cell);
-    cell->get_dof_indices(local_dof_indices);
-    
-    const std::vector<Point<dim>> &q_points    = fe_v.get_quadrature_points();
-    const std::vector<Tensor<1, dim>> &normals = fe_v.get_normal_vectors();
-      
-    //1) we obtain the spherical coordinates of all the cell dofs and the cell vertices
-    //std::cout<<"# "<<cell<<"Supp Cart:  "<<std::endl;
-    std::vector<Point<dim> > spher_local_supp_points(fe->dofs_per_cell);
-    
-    if (dim==2)
-    {
-      AssertThrow(dim == 3, ExcMessage("Not yet implemented for dim = 2"));
-    }
-    
-    bool sing_on_cell = false;
-    bool quasi_sing_cell = false;
-    
-    //translation and matrices for rotation initializing here
-    std::vector<Tensor<2,dim>> Rotations;
-    Rotations.clear();
-    std::vector<Tensor<2,dim>> QRotations;
-    QRotations.clear();
-    std::vector<Tensor<2,dim>> Rots;
-    Rots.clear();
-    Point<dim> translation(0.0,0.0,0.0);
-
-    using Triangle = std::vector<Point<dim>>;
-    std::vector<Triangle> subtriangles(4);
-    
-    using SubCell = std::vector<Point<dim>>;    // quadrilateral
-    std::vector<SubCell> subcells;              // variable number of subcells 1 2 3 or 4 
-    
-    Point<dim> sing_to_use(0.0,0.0,0.0);
-    Point<dim-1> qsing_to_use(0.0,0.0);
-    double distance_to_singularity_ratio = std::numeric_limits<double>::infinity();
-    
-    if constexpr (dim==3)
-    {          
-      // define local support points to act only on one cell
-      std::vector<Point<dim>> local_support_points(fe->dofs_per_cell);
-      for (unsigned int i = 0; i < fe->dofs_per_cell; ++i)
-        local_support_points[i] = support_points[ local_dof_indices[i] ];
-      std::vector<Point<dim>> points_to_use(fe->dofs_per_cell);    
-      
-      // check if the singularity is on the cell
-      unsigned int singular_local_index = numbers::invalid_unsigned_int;
-      for (unsigned int jj=0; jj<fe->dofs_per_cell; ++jj)
-      {       
-        if((singularity-support_points[local_dof_indices[jj]]).norm() < 1e-14)
-        {
-          sing_on_cell = true;
-          singular_local_index = jj;
-          break;
-        }    
-      }
-      
-      // check if the cell is quasi singular: if it's close enough to singularity
-      if(!sing_on_cell)
-      {
-        double dist_to_center = (singularity - cell->center()).norm();
-        double h = cell->diameter();
-        if(dist_to_center - 0.5*h < 0.1)
-        {
-          QuasiSingularKernelIntegral<dim> qski(cell, *fe, *mapping, singularity);
-          qsing_to_use = qski.get_closest_reference_point();
-          double dist_to_cell = qski.min_distance;
-          
-          distance_to_singularity_ratio = dist_to_cell / cell->diameter();
-          if(distance_to_singularity_ratio < 0.6)
-            quasi_sing_cell = true;
-        }
-      }
-
-//      // printing the cartesian points
-//      for (unsigned int jj=0; jj<fe->dofs_per_cell; ++jj)
-//      {
-//        Point<dim> P(local_support_points[jj]-singularity);
-//        std::cout<<std::setprecision(8)<<"#"<<P<<std::endl; 
-//      }
-      
-      // if singularity is on cell split the cell      
-      if(sing_on_cell)
-      {
-        points_to_use = local_support_points;
-        sing_to_use = singularity;
-        
-        // TODO: add the points to subtriangles: to each their own following the scheme
-        // S A B (P SP) AB SA SB SAB
-        // instert an if on FE degree o ci sono trucchi?
-        
-        // creating subtriangles
-        subtriangles[0] = {{ sing_to_use, points_to_use[0], points_to_use[1] }};
-        subtriangles[1] = {{ sing_to_use, points_to_use[1], points_to_use[3] }};
-        subtriangles[2] = {{ sing_to_use, points_to_use[3], points_to_use[2] }};
-        subtriangles[3] = {{ sing_to_use, points_to_use[2], points_to_use[0] }};
-        
-        // loop on triangles 
-        for (unsigned int i = 0; i < subtriangles.size(); ++i)
-        {        
-          if(!triangle_is_valid(subtriangles[i]))
-          {
-            continue;
-          }
-          
-          // move singularity in the origin
-          for (unsigned int jj=1; jj < subtriangles[i].size(); ++jj)
-            subtriangles[i][jj] -= sing_to_use; 
-          
-          // rotate valid triangle
-          const Point<dim> &A = subtriangles[i][1];
-          const Point<dim> &B = subtriangles[i][2];
-          Tensor<1,dim> ex = A / A.norm(); // new x-axis
-          
-          // compute orthonormal basis (ex,ey,ez)
-          Tensor<1,dim> ez = cross_product_3d(ex,B);
-          ez /= ez.norm(); // new z-axis
-          Tensor<1,dim> ey = cross_product_3d(ez, ex); // new y-axis
-
-          // build rotation matrix E = [ex ey ez]
-          Tensor<2,dim> E;
-          for (unsigned int ii=0; ii < dim; ++ii)
-          {
-            E[0][ii] = ex[ii];
-            E[1][ii] = ey[ii];
-            E[2][ii] = ez[ii];
-          }
-          
-          // save rotation and translation
-          translation = sing_to_use;
-          Rotations.push_back(E);
-          //std::cout << "rotation matrix: \n" << E << "\n" << Rotations.back() << std::endl;
-          
-          for (unsigned int jj=1; jj < subtriangles[i].size(); ++jj)      // rotate subtriangle vertices 1 and 2
-          {
-            const Point<dim> &X = subtriangles[i][jj];
-            Point<dim> Xnew;
-            for (unsigned int kk=0; kk<dim; ++kk)
-            {
-              Xnew[kk] = 0.0;
-              for (unsigned int tt=0; tt<dim; ++tt)
-                Xnew[kk] += E[kk][tt] * X[tt];
-            }
-            subtriangles[i][jj] = Xnew; 
-          }
-          
-          //1) convert to spherical the vertices 1 and 2
-          for (unsigned int jj=1; jj < subtriangles[i].size(); ++jj)
-          {
-            Point<dim> spher;
-            Point<dim> cart(subtriangles[i][jj]);
-            
-            double r = cart.norm();
-            double theta = acos(cart(2)/r);
-            double phi = std::atan2(cart(1), cart(0));
-                
-            spher(0)=r; spher(1)=theta;
-            if (dim==3)
-              spher(2)=phi;
-            subtriangles[i][jj] = spher;
-          }
-      
-          //1.1) fix the jump acros -pi and pi for phi   
-          for (unsigned int jj = 1; jj < subtriangles[i].size(); ++jj)
-          {
-            double &phi = subtriangles[i][jj](2);
-            double prev = subtriangles[i][jj-1](2);
-
-            while (phi - prev > numbers::PI)
-              phi -= 2.0 * numbers::PI;
-
-            while (phi - prev < -numbers::PI)
-              phi += 2.0 * numbers::PI;
-          }
-          
-          // modify first point of trinangle to (0, thetaA, phiA)
-          subtriangles[i][0](0) = 0.0;
-          subtriangles[i][0](1) = subtriangles[i][1](1);
-          subtriangles[i][0](2) = subtriangles[i][1](2);
-          
-          //add a point to valid triangles (S, A, B) --> (S, A, B, P)
-          // std::cout<<"#creating quadrilateral subcell nr. "<< i <<std::endl;
-          Point<dim> P(subtriangles[i][0](0), subtriangles[i][2](1), subtriangles[i][2](2));
-          SubCell this_cell;
-          this_cell = {{subtriangles[i][0], subtriangles[i][1], subtriangles[i][2], P}};
-          subcells.push_back(this_cell);
-          
-//          // print subcell points
-//          std::cout<<"Subcell nr. "<< i << " dofs: "<<std::endl;        
-//          for (unsigned int jj=0; jj < subcells.back().size(); ++jj)
-//          {
-//            std::cout<<subcells.back()[jj]<<std::endl;
-//          }
-          
-        }// end loop triangles    
-      } //end if(sing_on_cell)
-      else if(quasi_sing_cell)   // if the cell is quasi singular use spherical with the center in the projection point (TODO: implement in proportional measure)      
-      {            
-        Point<dim> closest_point = mapping->transform_unit_to_real_cell(cell, qsing_to_use);
-        //std::cout << "Projection on the quasi singular cell: " << closest_point << std::endl;
-
-        points_to_use = local_support_points;
-        sing_to_use = closest_point;
-        
-        // save translation
-        translation = sing_to_use;
-        
-        // creating subtriangles
-        subtriangles[0] = {{ sing_to_use, points_to_use[0], points_to_use[1] }};
-        subtriangles[1] = {{ sing_to_use, points_to_use[1], points_to_use[3] }};
-        subtriangles[2] = {{ sing_to_use, points_to_use[3], points_to_use[2] }};
-        subtriangles[3] = {{ sing_to_use, points_to_use[2], points_to_use[0] }};
-        
-        // loop on triangles 
-        for (unsigned int i = 0; i < subtriangles.size(); ++i)
-        {        
-          if(!triangle_is_valid(subtriangles[i]))
-          {
-            // std::cout<<"#subcell nr. " << i << " is invalid, skip it "<<std::endl;
-            continue;
-          }
-          
-          // move singularity in the origin
-          for (unsigned int jj=1; jj < subtriangles[i].size(); ++jj)
-            subtriangles[i][jj] -= sing_to_use; 
-          
-          // rotate valid triangle
-          const Point<dim> &A = subtriangles[i][1];
-          const Point<dim> &B = subtriangles[i][2];
-          Tensor<1,dim> ex = A / A.norm(); // new x-axis
-          
-          // compute orthonormal basis (ex,ey,ez)
-          Tensor<1,dim> ez = cross_product_3d(ex,B);
-          ez /= ez.norm(); // new z-axis
-          Tensor<1,dim> ey = cross_product_3d(ez, ex); // new y-axis
-
-          // build rotation matrix E = [ex ey ez]
-          Tensor<2,dim> E;
-          for (unsigned int ii=0; ii < dim; ++ii)
-          {
-            E[0][ii] = ex[ii];
-            E[1][ii] = ey[ii];
-            E[2][ii] = ez[ii];
-          }
-          
-          //saving rotations here
-          QRotations.push_back(E);
-          //std::cout << "rotation matrix: \n" << E << "\n" << Rotations.back() << std::endl;
-          
-          for (unsigned int jj=1; jj < subtriangles[i].size(); ++jj)      // rotate subtriangle vertices 1 and 2
-          {
-            const Point<dim> &X = subtriangles[i][jj];
-            Point<dim> Xnew;
-            for (unsigned int kk=0; kk<dim; ++kk)
-            {
-              Xnew[kk] = 0.0;
-              for (unsigned int tt=0; tt<dim; ++tt)
-                Xnew[kk] += E[kk][tt] * X[tt];
-            }
-            subtriangles[i][jj] = Xnew; 
-          }
-          
-          //1) convert to spherical the vertices 1 and 2
-          for (unsigned int jj=1; jj < subtriangles[i].size(); ++jj)
-          {
-            Point<dim> spher;
-            Point<dim> cart(subtriangles[i][jj]);
-            
-            double r = cart.norm();
-            double theta = acos(cart(2)/r);
-            double phi = std::atan2(cart(1), cart(0));
-                
-            spher(0)=r; spher(1)=theta;
-            if (dim==3)
-              spher(2)=phi;
-            subtriangles[i][jj] = spher;
-          }
-      
-          //1.1) fix the jump acros -pi and pi for phi   
-          for (unsigned int jj = 1; jj < subtriangles[i].size(); ++jj)
-          {
-            double &phi = subtriangles[i][jj](2);
-            double prev = subtriangles[i][jj-1](2);
-
-            while (phi - prev > numbers::PI)
-              phi -= 2.0 * numbers::PI;
-
-            while (phi - prev < -numbers::PI)
-              phi += 2.0 * numbers::PI;
-          }
-          
-          // modify first point of trinangle to (0, thetaA, phiA)
-          subtriangles[i][0](0) = 0.0;
-          subtriangles[i][0](1) = subtriangles[i][1](1);
-          subtriangles[i][0](2) = subtriangles[i][1](2);
-          
-          //add a point to valid triangles (S, A, B) --> (S, A, B, P)
-          //std::cout<<"#creating quadrilateral subcell nr. "<< i <<std::endl;
-          Point<dim> P(subtriangles[i][0](0), subtriangles[i][2](1), subtriangles[i][2](2));
-          SubCell this_cell;
-          this_cell = {{subtriangles[i][0], subtriangles[i][1], subtriangles[i][2], P}};
-          subcells.push_back(this_cell);
-          
-//          // print subcell points
-//          std::cout<<"Subcell nr. "<< i << " dofs: "<<std::endl;        
-//          for (unsigned int jj=0; jj < subcells.back().size(); ++jj)
-//          {
-//            std::cout<<subcells.back()[jj]<<std::endl;
-//          }
-          
-        }// end loop triangles
-
-      } // end if(quasi_sing_cell)
-      else   // normal cell: rotate and convert to spherical
-      {
-        Tensor <2,dim> E;        
-        points_to_use.resize(fe->dofs_per_cell);
-        rotate_cell<dim>(cell, local_support_points, singularity, points_to_use, sing_to_use,E);
-        
-        // save rotation and translation
-        Rots.push_back(E);
-        translation = singularity;
-        
-        //1) convert to spherical
-        for (unsigned int j=0; j<fe->dofs_per_cell; ++j)
-        {
-          Point<dim> spher;
-          Point<dim> cart(points_to_use[j]-sing_to_use);  //coordinates traslated to singularity in r = 0.0
-
-          // here we print the (eventually rotated) coordinates of the dofs support points
-          // std::cout<<std::setprecision(8)<<cart<<std::endl;
-          
-          double r = cart.norm();
-          double theta = acos(cart(2)/r);
-          double phi = std::atan2(cart(1), cart(0));
-              
-          spher(0)=r; spher(1)=theta;
-          if (dim==3)
-            spher(2)=phi;
-          spher_local_supp_points[j] = spher;
-        }
-    
-        //1.1) fix the jump acros -pi and pi for phi   
-        for (unsigned int j = 1; j < fe->dofs_per_cell; ++j)
-        {
-          double &phi = spher_local_supp_points[j](2);
-          double prev = spher_local_supp_points[j-1](2);
-
-          while (phi - prev > numbers::PI)
-            phi -= 2.0 * numbers::PI;
-
-          while (phi - prev < -numbers::PI)
-            phi += 2.0 * numbers::PI;
-        }
-        
-//        // print the spherical coordinates computed
-//        std::cout<<cell<<"#  Supp Spher:  "<<std::endl;
-//        for (unsigned int j=0; j<fe->dofs_per_cell; ++j)
-//        {
-//          std::cout<<spher_local_supp_points[j]<<std::endl;
-//        }
-        
-        // create one single subcell
-        subcells.resize(1);
-        subcells[0] = spher_local_supp_points;
-        
-      } // end else
-    } // end dim==3   
-    
-    double spher_cell_area = 0.0;
-    double telles_cell_area = 0.0;
-    double sinh_cell_area  = 0.0;
-    double subdivision_cell_area = 0.0;
-    double max_spherical_normal_alignment_error = 0.0;
-    for(unsigned int c = 0; c<subcells.size(); ++c)
-    {  
-      //2) create a one cell triangulation with the one cell and cell vertices spherical coordinates
-      std::vector<Point<dim>>        spher_vertices;
-      std::vector<CellData<dim - 1>> spher_cells;
-      SubCellData                    spher_subcelldata;
-      
-      spher_vertices.resize(4);
-      spher_cells.resize(1);
-      
-      if(sing_on_cell || quasi_sing_cell)
-      {
-        spher_vertices[0] = subcells[c][0];
-        spher_vertices[1] = subcells[c][1];
-        spher_vertices[2] = subcells[c][3];
-        spher_vertices[3] = subcells[c][2];
-        
-        spher_cells[0].vertices[0]  = 0;
-        spher_cells[0].vertices[1]  = 1;
-        spher_cells[0].vertices[2]  = 2;
-        spher_cells[0].vertices[3]  = 3; 
-      }
-      else
-      {
-        for (unsigned int j=0; j<GeometryInfo<dim - 1>::vertices_per_cell; ++j)
-          spher_vertices[j] = subcells[c][j];       //qui
-        
-        spher_cells[0].vertices[0]  = 0;
-        spher_cells[0].vertices[1]  = 1;
-        spher_cells[0].vertices[2]  = 2;
-        spher_cells[0].vertices[3]  = 3;  
-      }
-      
-      Triangulation<dim - 1, dim> spher_tria;
-      GridTools::delete_unused_vertices(spher_vertices, spher_cells, spher_subcelldata);
-      GridTools::consistently_order_cells(spher_cells);
-      spher_tria.create_triangulation(spher_vertices, spher_cells, spher_subcelldata);
-        
-      //3) create a dh and a gradient_dh on the new one cell tria    
-      DoFHandler<dim - 1, dim>  spher_dh(spher_tria);
-      DoFHandler<dim - 1, dim>  spher_gradient_dh(spher_tria);
-      spher_dh.distribute_dofs(*fe);
-      spher_gradient_dh.distribute_dofs(*gradient_fe);
-      DoFRenumbering::component_wise(spher_dh);
-      DoFRenumbering::component_wise(spher_gradient_dh);
-         
-      //4) prepare the vector with the local --- polar --- coordinates
-      //   for the one cell mapping on the new tria/dh
-      Vector<double>  spher_map_vector(spher_gradient_dh.n_dofs());
-      std::shared_ptr<Mapping<dim - 1, dim>> spher_mapping;          
-      if (mapping_type == "FE")
-        spher_mapping = std::make_shared<MappingFEField<dim - 1, dim>>(spher_gradient_dh,
-                                                                   spher_map_vector);
-      else
-        spher_mapping = std::make_shared<MappingQ<dim - 1, dim>>(mapping_degree);
-          
-      if(sing_on_cell || quasi_sing_cell)
-      {
-        const std::vector<unsigned int> ref_to_subcell = {0, 1, 3, 2};
-        
-        for (unsigned int j=0; j<fe->dofs_per_cell; ++j)    //TODO: now works only for linear fe
-        {
-          const Point<dim> &p =
-            (subcells[c].size() == ref_to_subcell.size() ?
-               subcells[c][ref_to_subcell[j]] :
-               subcells[c][j]);
-          
-          spher_map_vector(j+0*fe->dofs_per_cell) = p(0);
-          spher_map_vector(j+1*fe->dofs_per_cell) = p(1);
-          spher_map_vector(j+2*fe->dofs_per_cell) = p(2);//spher_local_supp_points[j](2);
-        }
-      }
-      else
-      {
-        for (unsigned int j=0; j<fe->dofs_per_cell; ++j)    //TODO: now works only for linear fe
-        {
-          spher_map_vector(j+0*fe->dofs_per_cell) = subcells[c][j](0);
-          spher_map_vector(j+1*fe->dofs_per_cell) = subcells[c][j](1);
-          spher_map_vector(j+2*fe->dofs_per_cell) = subcells[c][j](2);//spher_local_supp_points[j](2);
-        }
-      }
-      
-      //5) create and FEValues on the new dh
-      FEValues<dim - 1, dim> spher_fe_v(*spher_mapping,
-                                          *fe,
-                                          *quadrature,
-                                          update_values | update_gradients | update_normal_vectors |
-                                          update_jacobians | update_quadrature_points | update_JxW_values);
-        
-        
-      //6) loop on quadrature nodes to compute cell area 
-      // both in standard way and with polar coordinates                                  
-      cell_it spher_cell = spher_dh.begin_active(); 
-      spher_fe_v.reinit(spher_cell);
-      const std::vector<Point<dim>> &spher_q_points = spher_fe_v.get_quadrature_points();
-      
-      // compute subcell area
-      double spher_subcell_area = 0.0;
-      
-      Tensor<2,dim> RT;
-      if (sing_on_cell)
-        RT = transpose(Rotations[c]);
-      else if (quasi_sing_cell)
-        RT = transpose(QRotations[c]);
-      else
-        RT = Rots[c];
-      
-      for (unsigned int q = 0; q < n_q_points; ++q)
-      {
-        double r = spher_q_points[q](0);
-        double theta = spher_q_points[q](1);
-        double phi = spher_q_points[q](2);
-        
-        Tensor<2,dim> Js;
-        Js[0][0] = sin(theta) * cos(phi); Js[0][1] = r * cos(theta) * cos(phi); Js[0][2] = -r * sin(theta) * sin(phi);  
-        Js[1][0] = sin(theta) * sin(phi); Js[1][1] = r * cos(theta) * sin(phi); Js[1][2] = r * sin(theta) * cos(phi);
-        Js[2][0] = cos(theta); Js[2][1] = -r * sin(theta); Js[2][2] = 0;
-        
-        Tensor<2,dim> Js_inv_T;   // Js inverso trasposto
-        Js_inv_T[0][0] = sin(theta)*cos(phi); Js_inv_T[0][1] = cos(theta)*cos(phi)/r; Js_inv_T[0][2] = -sin(phi)/(r*sin(theta));
-        Js_inv_T[1][0] = sin(theta)*sin(phi); Js_inv_T[1][1] = cos(theta)*sin(phi)/r; Js_inv_T[1][2] = cos(phi)/(r*sin(theta));
-        Js_inv_T[2][0] = cos(theta); Js_inv_T[2][1] = -sin(theta)/r; Js_inv_T[2][2] = 0;
-        
-        DerivativeForm<1, dim-1, dim> Jrtf_uv = spher_fe_v.jacobian(q);
-        Tensor<1,dim> rtf_u;
-        Tensor<1,dim> rtf_v;
-        for(unsigned int ii = 0; ii < dim; ++ii)
-        {
-          rtf_u[ii] = Jrtf_uv[ii][0];
-          rtf_v[ii] = Jrtf_uv[ii][1];
-        }
-        
-        // Nanson formula for area cell
-        Tensor<1,dim> NN = cross_product_3d(rtf_u,rtf_v);
-        Tensor<1,dim> Js_inv_T_NN = Js_inv_T * NN; 
-        double area_contrib = std::sin(theta) *Js_inv_T_NN.norm();
-        // double area_cell = r*r*std::sin(theta) *Js_inv_T_NN.norm();  
-
-        // compute double layer potential in spherical coordinates
-        Js_inv_T_NN = Js_inv_T_NN / Js_inv_T_NN.norm();
-        double dGdn = ( Js_inv_T_NN[0] * std::sin(theta) * std::cos(phi) + Js_inv_T_NN[1] * std::sin(theta) * std::sin(phi) + Js_inv_T_NN[2] * std::cos(theta) ) 
-                        / (4*numbers::PI); // r*r
-        
-        double spher_weight = quadrature->weight(q);
-        spher_subcell_area += dGdn * area_contrib * spher_weight;       
-        
-//        // print spherical quadrature points in spherical coordinates
-//        std::cout << "# Spherical quad points: " << std::endl;
-//        std::cout<<spher_q_points[q]<<std::endl;
-
-        // error on the normal to compare with cartesian
-        Tensor<1, dim> spherical_normal_original = RT * Js_inv_T_NN;
-        const double normal_alignment = spherical_normal_original * normals[q];
-        max_spherical_normal_alignment_error =
-          std::max(max_spherical_normal_alignment_error,
-                   1.0 - std::abs(normal_alignment));
- 
-      } // end loop on quadrature nodes
-      spher_cell_area += spher_subcell_area;
-
-      // save spherical quadrature points in cartesian coordinates on file
-      std::vector<Point<dim>> quadrature_points_rotated;
-      quadrature_points_rotated.resize(n_q_points);      
-      for(unsigned int q = 0; q < n_q_points; ++q)
-      {
-        // convert to cartesian each quadrature point
-        double r = spher_q_points[q](0);
-        double theta = spher_q_points[q](1);
-        double phi = spher_q_points[q](2);
-        quadrature_points_rotated[q][0] = r * std::sin(theta) * std::cos(phi);
-        quadrature_points_rotated[q][1] = r * std::sin(theta) * std::sin(phi);
-        quadrature_points_rotated[q][2] = r * std::cos(theta);
-      
-        //rotate each node with RT and shift with singularity
-        quadrature_points_rotated[q] = RT * quadrature_points_rotated[q];
-        quadrature_points_rotated[q] += translation;
-        // print points
-        //std::cout<<quadrature_points_rotated[q]<<std::endl;
-        
-        // save quadrature points inside a file
-        //file << quadrature_points_rotated[q] << "\n";
-      }    
-          
-    } //end loop subcells
-    
-    // compute cell area with 3 other versions for quasi sing cells (telles, sinh, subdivision)
-    // use duffy for singular cells
-    double sing_subcell_area = 0.0;
-    double telles_subcell_area = 0.0;
-    double sinh_subcell_area  = 0.0;
-    double subdivision_subcell_area = 0.0;
-    if constexpr (dim == 3)   // this is needed to make telles quadrature work, TODO telles quadrature for dim 1
-    {
-      if(quasi_sing_cell)
-      {
-      
-        // compute area with diy telles quadrature   
-        unsigned int n_telles = quadrature_order;
-        Quadrature<2> telles_quad = telles_quadrature(
-                                      cell,
-                                      *mapping,
-                                      singularity,
-                                      qsing_to_use,
-                                      n_telles,
-                                      2  // alpha=2 for 1/r^2 kernel
-                                      );
-        FEValues<2,3> telles_fe_v(*mapping, *fe, telles_quad,
-                                  update_values | update_gradients | update_normal_vectors |
-                                  update_jacobians | update_quadrature_points | update_JxW_values);
-        telles_fe_v.reinit(cell);               
-        const unsigned int n_q_telles = telles_quad.size();
-        const std::vector<Point<dim>>    &telles_q_points  = telles_fe_v.get_quadrature_points();
-        const std::vector<Tensor<1,dim>> &telles_normals = telles_fe_v.get_normal_vectors(); 
-        
-        for (unsigned int q = 0; q < n_q_telles; ++q)
-        {
-          Tensor<1, dim> RR = telles_q_points[q]-singularity; //distanza euclidea tra xq e x0;
-          Point<dim> DD;
-          double     ss;
-          LaplaceKernel::kernels(RR, DD, ss);
-          double dGdn = DD * telles_normals[q];
-      
-          telles_subcell_area += -dGdn * telles_fe_v.JxW(q);
-          
-          file << telles_q_points[q] << "\n";
-        }
-
-        // compute area with sinh quadrature
-        QSinh<dim-1> sinh_quad(n_telles, qsing_to_use);
-        FEValues<dim-1, dim> sinh_fe_v(*mapping,
-                                        *fe,
-                                        sinh_quad,
-                                        update_values | update_gradients |
-                                        update_normal_vectors |
-                                        update_jacobians |
-                                        update_quadrature_points |
-                                        update_JxW_values);
-        sinh_fe_v.reinit(cell);
-        const unsigned int n_q_sinh = sinh_quad.size();
-        const std::vector<Point<dim>> &sinh_q_points =
-          sinh_fe_v.get_quadrature_points();
-        const std::vector<Tensor<1, dim>> &sinh_normals =
-          sinh_fe_v.get_normal_vectors();
-
-        for (unsigned int q = 0; q < n_q_sinh; ++q)
-        {
-          Tensor<1, dim> RR = sinh_q_points[q] - singularity;
-          Point<dim> DD;
-          double     ss;
-          LaplaceKernel::kernels(RR, DD, ss);
-          double dGdn = DD * sinh_normals[q];
-
-          sinh_subcell_area += -dGdn * sinh_fe_v.JxW(q);
-          
-          //file << sinh_q_points[q] << "\n";
-        }
-
-        // compute area with subdivision quadrature
-        QSubdivision<dim-1> subdivision_quad(n_telles, qsing_to_use);
-        FEValues<dim-1, dim> subdivision_fe_v(*mapping,
-                                               *fe,
-                                               subdivision_quad,
-                                               update_values |
-                                               update_gradients |
-                                               update_normal_vectors |
-                                               update_jacobians |
-                                               update_quadrature_points |
-                                               update_JxW_values);
-        subdivision_fe_v.reinit(cell);
-        const unsigned int n_q_subdivision = subdivision_quad.size();
-        const std::vector<Point<dim>> &subdivision_q_points =
-          subdivision_fe_v.get_quadrature_points();
-        const std::vector<Tensor<1, dim>> &subdivision_normals =
-          subdivision_fe_v.get_normal_vectors();
-
-        for (unsigned int q = 0; q < n_q_subdivision; ++q)
-        {
-          Tensor<1, dim> RR = subdivision_q_points[q] - singularity;
-          Point<dim> DD;
-          double     ss;
-          LaplaceKernel::kernels(RR, DD, ss);
-          double dGdn = DD * subdivision_normals[q];
-
-          subdivision_subcell_area += -dGdn * subdivision_fe_v.JxW(q);
-          
-          //file << subdivision_q_points[q] << "\n";
-        }
-          
-      } // end if(quasi_sing_cell)
-      else if(sing_on_cell)
-      {
-        // use qsplit and qduffy
-        //    QDuffy(n, beta): n = quadrature order, beta = 1.0 standard for 1/R singularities
-        //    QSplit automatically splits the reference cell into triangles
-        //    all with vertex zero at ref_sing, then applies QDuffy to each
-        Point<dim-1> ref_sing = mapping->transform_real_to_unit_cell(cell, singularity);
-        unsigned int n_duffy = singular_quadrature_order;
-        QDuffy duffy_quad(n_duffy, 1.0);
-        QSplit<dim-1> split_quad(duffy_quad, ref_sing);
-        FEValues<dim-1, dim> sing_fe_v(*mapping, *fe, split_quad,
-                                        update_values | update_gradients | update_normal_vectors |
-                                        update_jacobians | update_quadrature_points | update_JxW_values);
-        sing_fe_v.reinit(cell);
-        const unsigned int n_q_sing = split_quad.size();
-        const std::vector<Point<dim>> &sing_q_points = sing_fe_v.get_quadrature_points();
-        const std::vector<Tensor<1, dim>> &sing_normals = sing_fe_v.get_normal_vectors();
-        
-        for (unsigned int q = 0; q < n_q_sing; ++q)
-        {
-          Tensor<1, dim> RR = sing_q_points[q] - singularity;
-          Point<dim> DD;
-          double     ss;
-          LaplaceKernel::kernels(RR, DD, ss);
-          double dGdn = DD * sing_normals[q];
-
-          sing_subcell_area += -dGdn * sing_fe_v.JxW(q);
-          
-          file << sing_q_points[q] << "\n";
-        }
-        
-      }// end if (sing_on_cell)
-    } // end if(dim == 3)
-    telles_cell_area += (quasi_sing_cell) ? telles_subcell_area : (sing_on_cell) ? sing_subcell_area : spher_cell_area;
-    sinh_cell_area += (quasi_sing_cell) ? sinh_subcell_area : (sing_on_cell) ? sing_subcell_area : spher_cell_area;
-    subdivision_cell_area += (quasi_sing_cell) ? subdivision_subcell_area : (sing_on_cell) ? sing_subcell_area : spher_cell_area; 
-    
-    // compute cartesian cell area
-    double cell_area = 0.0; 
-    for (unsigned int q = 0; q < n_q_points; ++q)
-    {
-      Tensor<1, dim> RR = q_points[q]-singularity; //distanza euclidea tra xq e x0;
-      Point<dim> DD;
-      double     ss;
-      LaplaceKernel::kernels(RR, DD, ss);
-      double dGGdn = DD * normals[q];
-      
-      cell_area += dGGdn * fe_v.JxW(q);
-      
-      if((!sing_on_cell) || (!quasi_sing_cell))
-        file << q_points[q] << "\n";
-    }
-    
-    //save data cell by cell
-    const unsigned int cell_data_index = cell->active_cell_index();
-    const double       cartesian_contribution = -cell_area;
-    const double       denominator = std::max(std::abs(cartesian_contribution), 1e-14);                                 
-                                          
-    cartesian_integral_per_cell[cell_data_index]    = cartesian_contribution;
-    spherical_integral_per_cell[cell_data_index]    = spher_cell_area;
-    telles_integral_per_cell[cell_data_index]       = telles_cell_area;
-    sinh_integral_per_cell[cell_data_index]         = sinh_cell_area;
-    subdivision_integral_per_cell[cell_data_index]  = subdivision_cell_area;
-    
-    absolute_error_per_cell[cell_data_index] = std::abs(spher_cell_area - cartesian_contribution);
-    relative_error_per_cell[cell_data_index] = absolute_error_per_cell[cell_data_index] / denominator;
-    telles_absolute_error_per_cell[cell_data_index] = std::abs(telles_cell_area - cartesian_contribution);
-    telles_relative_error_per_cell[cell_data_index] = telles_absolute_error_per_cell[cell_data_index] / denominator;
-    sinh_absolute_error_per_cell[cell_data_index] = std::abs(sinh_cell_area - cartesian_contribution);
-    sinh_relative_error_per_cell[cell_data_index] = sinh_absolute_error_per_cell[cell_data_index] / denominator;
-    subdivision_absolute_error_per_cell[cell_data_index] = std::abs(subdivision_cell_area - cartesian_contribution);
-    subdivision_relative_error_per_cell[cell_data_index] = subdivision_absolute_error_per_cell[cell_data_index] / denominator;
-    
-    sinh_abs_error_minus_telles_abs_error[cell_data_index] =
-      sinh_absolute_error_per_cell[cell_data_index] - telles_absolute_error_per_cell[cell_data_index];
-    subdivision_abs_error_minus_telles_abs_error[cell_data_index] =
-      subdivision_absolute_error_per_cell[cell_data_index] - telles_absolute_error_per_cell[cell_data_index];
-
-    spherical_normal_alignment_error_per_cell[cell_data_index] =
-      max_spherical_normal_alignment_error;
-      
-    quasi_singular_cell_flag[cell_data_index] = quasi_sing_cell ? 1.0 : 0.0;
-    singular_cell_flag[cell_data_index]       = sing_on_cell ? 1.0 : 0.0;
-    
-    distance_to_singularity_over_cell_diameter[cell_data_index] =
-      std::isfinite(distance_to_singularity_ratio) ? distance_to_singularity_ratio : -1.0;
-       
-    // total error estimators
-    tot_area_cart += cell_area;
-    tot_area_sph += spher_cell_area;
-    tot_area_telles += telles_cell_area;
-    tot_area_sinh += sinh_cell_area;
-    tot_area_subdivision += subdivision_cell_area; 
-  } // end loop on cells
-
-  // relative errors wrt value of alpha
-  relative_error_vs_smooth_field =  std::abs(tot_area_sph - 0.5) / 0.5;
-  relative_error_vs_geom_alpha_field =  std::abs(tot_area_sph - correct_geom_alpha) / correct_geom_alpha;
-
-  double max_absolute_cell_error  = 0.0;
-  double max_relative_cell_error  = 0.0;
-  double mean_absolute_cell_error = 0.0;
-  double mean_relative_cell_error = 0.0;
-  double max_telles_absolute_cell_error  = 0.0;
-  double max_telles_relative_cell_error  = 0.0;
-  double mean_telles_absolute_cell_error = 0.0;
-  double mean_telles_relative_cell_error = 0.0;
-  double max_sinh_absolute_cell_error  = 0.0;
-  double max_sinh_relative_cell_error  = 0.0;
-  double mean_sinh_absolute_cell_error = 0.0;
-  double mean_sinh_relative_cell_error = 0.0;
-  double max_subdivision_absolute_cell_error  = 0.0;
-  double max_subdivision_relative_cell_error  = 0.0;
-  double mean_subdivision_absolute_cell_error = 0.0;
-  double mean_subdivision_relative_cell_error = 0.0;
-  double max_spherical_normal_alignment_error = 0.0;
-  unsigned int n_quasi_singular_cells = 0;
-  unsigned int n_singular_cells       = 0;
-  unsigned int max_abs_error_cell_index             = 0;
-  unsigned int max_telles_abs_error_cell_index      = 0;
-  unsigned int max_sinh_abs_error_cell_index        = 0;
-  unsigned int max_subdivision_abs_error_cell_index = 0;
-
-  //  This code loops over all cells and extracts:
-  //  maximum errors,
-  //  mean errors,
-  //  indices of the worst cells,
-  //  counts of special cells,
-  //  counts of which Telles rule was used.
-  for (unsigned int i = 0; i < absolute_error_per_cell.size(); ++i)
-    {
-      if (absolute_error_per_cell[i] > max_absolute_cell_error)
-      {
-        max_absolute_cell_error = absolute_error_per_cell[i];
-        max_abs_error_cell_index = i;
-      }
-      max_relative_cell_error =  std::max(max_relative_cell_error, relative_error_per_cell[i]);
-      mean_absolute_cell_error += absolute_error_per_cell[i];
-      mean_relative_cell_error += relative_error_per_cell[i];
-      
-      if (telles_absolute_error_per_cell[i] > max_telles_absolute_cell_error)
-      {
-        max_telles_absolute_cell_error = telles_absolute_error_per_cell[i];
-        max_telles_abs_error_cell_index = i;
-      }
-      max_telles_relative_cell_error = std::max(max_telles_relative_cell_error, telles_relative_error_per_cell[i]);
-      mean_telles_absolute_cell_error += telles_absolute_error_per_cell[i];
-      mean_telles_relative_cell_error += telles_relative_error_per_cell[i];
-      
-      if (sinh_absolute_error_per_cell[i] > max_sinh_absolute_cell_error)
-      {
-        max_sinh_absolute_cell_error = sinh_absolute_error_per_cell[i];
-        max_sinh_abs_error_cell_index = i;
-      }
-      max_sinh_relative_cell_error = std::max(max_sinh_relative_cell_error, sinh_relative_error_per_cell[i]);
-      mean_sinh_absolute_cell_error += sinh_absolute_error_per_cell[i];
-      mean_sinh_relative_cell_error += sinh_relative_error_per_cell[i];
-      
-      if (subdivision_absolute_error_per_cell[i] > max_subdivision_absolute_cell_error)
-      {
-        max_subdivision_absolute_cell_error = subdivision_absolute_error_per_cell[i];
-        max_subdivision_abs_error_cell_index = i;
-      }
-      max_subdivision_relative_cell_error = std::max(max_subdivision_relative_cell_error, subdivision_relative_error_per_cell[i]);
-      mean_subdivision_absolute_cell_error += subdivision_absolute_error_per_cell[i];
-      mean_subdivision_relative_cell_error += subdivision_relative_error_per_cell[i];
-      
-      max_spherical_normal_alignment_error = std::max(max_spherical_normal_alignment_error,
-                 spherical_normal_alignment_error_per_cell[i]);
-                 
-      n_quasi_singular_cells += (quasi_singular_cell_flag[i] > 0.5 ? 1u : 0u);
-      n_singular_cells += (singular_cell_flag[i] > 0.5 ? 1u : 0u);
-    }
-
-  max_abs_error_cell_flag[max_abs_error_cell_index]             = 1.0;
-  max_abs_error_cell_flag[max_telles_abs_error_cell_index]      = 1.0;
-  max_abs_error_cell_flag[max_sinh_abs_error_cell_index]        = 1.0;
-  max_abs_error_cell_flag[max_subdivision_abs_error_cell_index] = 1.0;
-
-  if (absolute_error_per_cell.size() > 0)
-    {
-      mean_absolute_cell_error /= absolute_error_per_cell.size();
-      mean_relative_cell_error /= relative_error_per_cell.size();
-      mean_telles_absolute_cell_error /= telles_absolute_error_per_cell.size();
-      mean_telles_relative_cell_error /= telles_relative_error_per_cell.size();
-      mean_sinh_absolute_cell_error /= sinh_absolute_error_per_cell.size();
-      mean_sinh_relative_cell_error /= sinh_relative_error_per_cell.size();
-      mean_subdivision_absolute_cell_error /= subdivision_absolute_error_per_cell.size();
-      mean_subdivision_relative_cell_error /= subdivision_relative_error_per_cell.size();
-    }
-
-  const double cartesian_total = -tot_area_cart;
-  const double geom_denominator = std::max(std::abs(correct_geom_alpha), 1e-14);
-  const double smooth_error = std::abs(tot_area_sph - 0.5) / 0.5;
-  const double geom_error = std::abs(tot_area_sph - correct_geom_alpha) / geom_denominator;
-  const double telles_smooth_error = std::abs(tot_area_telles - 0.5) / 0.5;
-  const double telles_geom_error = std::abs(tot_area_telles - correct_geom_alpha) / geom_denominator;
-  const double sinh_smooth_error = std::abs(tot_area_sinh - 0.5) / 0.5;
-  const double sinh_geom_error = std::abs(tot_area_sinh - correct_geom_alpha) / geom_denominator;
-  const double subdivision_smooth_error = std::abs(tot_area_subdivision - 0.5) / 0.5;
-  const double subdivision_geom_error = std::abs(tot_area_subdivision - correct_geom_alpha) / geom_denominator;
-  const double cartesian_geom_error = std::abs(cartesian_total - correct_geom_alpha) / geom_denominator;
-
-  // lambda function to print worst cells diagnostics
-  auto print_cell_error_details = [&](const std::string &label,
-                                      const unsigned int index) {
-    pcout << "  " << label << " max abs error cell:" << std::endl
-          << "    cell index: " << index << std::endl
-          << "    cartesian integral: " << cartesian_integral_per_cell[index]
-          << std::endl
-          << "    spherical integral: " << spherical_integral_per_cell[index]
-          << std::endl
-          << "    Telles integral: " << telles_integral_per_cell[index]
-          << std::endl
-          << "    sinh integral: " << sinh_integral_per_cell[index]
-          << std::endl
-          << "    subdivision integral: " << subdivision_integral_per_cell[index] 
-          << std::endl
-          << "    spherical abs error: " << absolute_error_per_cell[index]         
-          << std::endl
-          << "    telles abs error: " << telles_absolute_error_per_cell[index]
-          << std::endl
-          << "    sinh abs error: " << sinh_absolute_error_per_cell[index]
-          << std::endl
-          << "    subdivision abs error: " << subdivision_absolute_error_per_cell[index] 
-          << std::endl
-          << "    is singular: " << (singular_cell_flag[index] > 0.5 ? "true" : "false")
-          << std::endl
-          << "    is quasi singular: " << (quasi_singular_cell_flag[index] > 0.5 ? "true" : "false")
-          << std::endl
-          << "    distance/cell diameter: " << distance_to_singularity_over_cell_diameter[index] << std::endl
-          << "    spherical normal alignment error: " << spherical_normal_alignment_error_per_cell[index]
-          << std::endl;
-  };
-
-  // print overall quadrature stats
-  pcout << "Spherical quadrature accuracy summary:" << std::endl
-        << "  target singularity: " << target_singularity << std::endl
-        << "  selected singularity: " << singularity << std::endl
-        << "  singular dof index: " << sing_index << std::endl
-        << "  smooth near-edge dof selected: "
-        << (found_smooth_near_edge_dof ? "true" : "false") << std::endl
-        << "  target selection distance: " << min_singularity_distance
-        << std::endl
-        << "  total cartesian integral: " << cartesian_total << std::endl
-        << "  total spherical integral: " << tot_area_sph << std::endl
-        << "  total telles integral: " << tot_area_telles << std::endl
-        << "  total sinh integral: " << tot_area_sinh << std::endl
-        << "  total subdivision integral: " << tot_area_subdivision
-        << std::endl
-        << "  reference smooth alpha: " << 0.5 << std::endl
-        << "  reference geom_alpha: " << correct_geom_alpha << std::endl
-        << "  Spherical total rel error vs smooth: " << smooth_error << std::endl
-        << "  Spherical total rel error vs geom_alpha: " << geom_error
-        << std::endl
-        << "  Telles total rel error vs smooth: " << telles_smooth_error << std::endl
-        << "  Telles total rel error vs geom_alpha: " << telles_geom_error
-        << std::endl
-        << "  sinh total rel error vs smooth: " << sinh_smooth_error << std::endl
-        << "  sinh total rel error vs geom_alpha: " << sinh_geom_error
-        << std::endl
-        << "  subdivision total rel error vs smooth: " << subdivision_smooth_error << std::endl
-        << "  subdivision total rel error vs geom_alpha: " << subdivision_geom_error
-        << std::endl
-        << "  cartesian rel error vs geom_alpha: " << cartesian_geom_error
-        << std::endl
-        << "  Spherical mean cell rel error vs cartesian: " << mean_relative_cell_error << std::endl
-        << "  Spherical max cell rel error vs cartesian: " << max_relative_cell_error << std::endl
-        << "  Spherical mean cell abs error vs cartesian: " << mean_absolute_cell_error << std::endl
-        << "  Spherical max cell abs error vs cartesian: " << max_absolute_cell_error
-        << std::endl
-        << "  Telles mean cell rel error vs cartesian: " << mean_telles_relative_cell_error << std::endl
-        << "  Telles max cell rel error vs cartesian: " << max_telles_relative_cell_error << std::endl
-        << "  Telles mean cell abs error vs cartesian: " << mean_telles_absolute_cell_error << std::endl
-        << "  Telles max cell abs error vs cartesian: " << max_telles_absolute_cell_error
-        << std::endl
-        << "  sinh mean cell rel error vs cartesian: " << mean_sinh_relative_cell_error << std::endl
-        << "  sinh max cell rel error vs cartesian: " << max_sinh_relative_cell_error << std::endl
-        << "  sinh mean cell abs error vs cartesian: " << mean_sinh_absolute_cell_error << std::endl
-        << "  sinh max cell abs error vs cartesian: " << max_sinh_absolute_cell_error
-        << std::endl
-        << "  subdivision mean cell rel error vs cartesian: " << mean_subdivision_relative_cell_error << std::endl
-        << "  subdivision max cell rel error vs cartesian: " << max_subdivision_relative_cell_error << std::endl
-        << "  subdivision mean cell abs error vs cartesian: " << mean_subdivision_absolute_cell_error << std::endl
-        << "  subdivision max cell abs error vs cartesian: " << max_subdivision_absolute_cell_error
-        << std::endl
-        << "  quasi-singular cells: " << n_quasi_singular_cells << std::endl
-        << "  singular cells: " << n_singular_cells << std::endl
-        << "  max spherical normal alignment error: "
-        << max_spherical_normal_alignment_error << std::endl;
-
-  // print worst cells diagnostics
-  print_cell_error_details("Telles", max_telles_abs_error_cell_index);
-  if (max_sinh_abs_error_cell_index != max_telles_abs_error_cell_index)
-    print_cell_error_details("sinh", max_sinh_abs_error_cell_index);
-  if (max_subdivision_abs_error_cell_index != max_telles_abs_error_cell_index &&
-      max_subdivision_abs_error_cell_index != max_sinh_abs_error_cell_index)
-    print_cell_error_details("subdivision", max_subdivision_abs_error_cell_index);
-
-  // post-processing and visualization, writes quantities in spherical_quadrature_error.vtu
-  if (this_mpi_process == 0)
-    {
-      DataOut<dim - 1, dim> dataout;
-      dataout.attach_dof_handler(dh);
-      dataout.add_data_vector(cartesian_integral_per_cell,
-                              "cartesian_integral",
-                              DataOut<dim - 1, dim>::type_cell_data);
-      dataout.add_data_vector(spherical_integral_per_cell,
-                              "spherical_integral",
-                              DataOut<dim - 1, dim>::type_cell_data);
-      dataout.add_data_vector(telles_integral_per_cell,
-                              "telles_integral",
-                              DataOut<dim - 1, dim>::type_cell_data);                        
-      dataout.add_data_vector(sinh_integral_per_cell,
-                              "sinh_integral",
-                              DataOut<dim - 1, dim>::type_cell_data);
-      dataout.add_data_vector(subdivision_integral_per_cell,
-                              "subdivision_integral",
-                              DataOut<dim - 1, dim>::type_cell_data);
-      dataout.add_data_vector(absolute_error_per_cell,
-                              "spherical_abs_error_vs_cartesian",
-                              DataOut<dim - 1, dim>::type_cell_data);
-      dataout.add_data_vector(relative_error_per_cell,
-                              "spherical_rel_error_vs_cartesian",
-                              DataOut<dim - 1, dim>::type_cell_data);
-      dataout.add_data_vector(telles_absolute_error_per_cell,
-                              "telles_abs_error_vs_cartesian",
-                              DataOut<dim - 1, dim>::type_cell_data);
-      dataout.add_data_vector(telles_relative_error_per_cell,
-                              "telles_rel_error_vs_cartesian",
-                              DataOut<dim - 1, dim>::type_cell_data);                        
-      dataout.add_data_vector(sinh_absolute_error_per_cell,
-                              "sinh_abs_error_vs_cartesian",
-                              DataOut<dim - 1, dim>::type_cell_data);
-      dataout.add_data_vector(sinh_relative_error_per_cell,
-                              "sinh_rel_error_vs_cartesian",
-                              DataOut<dim - 1, dim>::type_cell_data);
-      dataout.add_data_vector(subdivision_absolute_error_per_cell,
-                              "subdivision_abs_error_vs_cartesian",
-                              DataOut<dim - 1, dim>::type_cell_data);
-      dataout.add_data_vector(subdivision_relative_error_per_cell,
-                              "subdivision_rel_error_vs_cartesian",
-                              DataOut<dim - 1, dim>::type_cell_data);
-      dataout.add_data_vector(sinh_abs_error_minus_telles_abs_error,
-                              "sinh_abs_error_minus_telles_abs_error",
-                              DataOut<dim - 1, dim>::type_cell_data);
-      dataout.add_data_vector(subdivision_abs_error_minus_telles_abs_error,
-                              "subdivision_abs_error_minus_telles_abs_error",
-                              DataOut<dim - 1, dim>::type_cell_data);
-      dataout.add_data_vector(max_abs_error_cell_flag,
-                              "is_max_abs_error_cell",
-                              DataOut<dim - 1, dim>::type_cell_data);
-      dataout.add_data_vector(spherical_normal_alignment_error_per_cell,
-                              "spherical_normal_alignment_error",
-                              DataOut<dim - 1, dim>::type_cell_data);
-      dataout.add_data_vector(quasi_singular_cell_flag,
-                              "is_quasi_singular_cell",
-                              DataOut<dim - 1, dim>::type_cell_data);
-      dataout.add_data_vector(singular_cell_flag,
-                              "is_singular_cell",
-                              DataOut<dim - 1, dim>::type_cell_data);
-      dataout.add_data_vector(distance_to_singularity_over_cell_diameter,
-                              "distance_to_singularity_over_cell_diameter",
-                              DataOut<dim - 1, dim>::type_cell_data);
-      dataout.add_data_vector(relative_error_vs_smooth_field,
-                              "total_rel_error_vs_smooth",
-                              DataOut<dim - 1, dim>::type_cell_data);
-      dataout.add_data_vector(relative_error_vs_geom_alpha_field,
-                              "total_rel_error_vs_geom_alpha",
-                              DataOut<dim - 1, dim>::type_cell_data);
-      dataout.build_patches(*mapping,
-                            mapping_degree,
-                            DataOut<dim - 1, dim>::curved_inner_cells);
-
-      std::ofstream file_error("spherical_quadrature_error.vtu");
-      dataout.write_vtu(file_error);
-    }
-return area;
-}
-
 template <>
 const Quadrature<2> &
 BEMProblem<3>::get_singular_quadrature(const unsigned int index) const
@@ -1716,6 +456,38 @@ BEMProblem<2>::get_singular_quadrature(const unsigned int index) const
                                          fe->get_unit_support_points()[i]));
       }
   return quadratures[index];
+}
+
+template <>
+const Quadrature<2>
+BEMProblem<3>::get_quasi_singular_quadrature(const typename DoFHandler<2,3>::active_cell_iterator &cell,
+                                              const Mapping<2,3> &mapping,
+                                              const Point<3> &singularity,
+                                              const Point<2> &ref_projection) const
+{
+  return telles_quadrature(
+        cell,
+        mapping,
+        singularity,
+        ref_projection,
+        quadrature_order,
+        2);
+}
+
+template <>
+const Quadrature<1>
+BEMProblem<2>::get_quasi_singular_quadrature(const typename DoFHandler<1,2>::active_cell_iterator &cell,
+                                              const Mapping<1,2> &mapping,
+                                              const Point<2> &singularity,
+                                              const Point<1> &ref_projection) const
+{
+  return telles_quadrature(
+        cell,
+        mapping,
+        singularity,
+        ref_projection,
+        quadrature_order,
+        2);
 }
 
 template <int dim>
@@ -2124,6 +896,8 @@ BEMProblem<dim>::assemble_system()
               local_neumann_matrix_row_i   = 0;
               local_dirichlet_matrix_row_i = 0;
 
+              Point<dim> singularity = support_points[i];
+              Point<dim-1> ref_projection(0.0,0.0);
               bool         is_singular    = false;
               unsigned int singular_index = numbers::invalid_unsigned_int;
 
@@ -2135,6 +909,25 @@ BEMProblem<dim>::assemble_system()
                     is_singular    = true;
                     break;
                   }
+                  
+              bool is_quasi_singular = false;
+              if (is_singular == false)
+              {
+                Point<dim> singularity = support_points[i];
+                double dist_to_center = (singularity - cell->center()).norm();
+                double h = cell->diameter();
+                if(dist_to_center - 0.5*h < 0.1)
+                {
+                  QuasiSingularKernelIntegral<dim> qski(cell, *fe, *mapping, singularity);
+                  ref_projection = qski.get_closest_reference_point();
+                  double dist_to_cell = qski.min_distance;
+                  
+                  double distance_ratio = dist_to_cell / cell->diameter();
+                  if(distance_ratio < 0.6)
+                    is_quasi_singular = true;
+                }
+
+              }
 
               // We then perform the
               // integral. If the index $i$
@@ -2145,24 +938,62 @@ BEMProblem<dim>::assemble_system()
               // right hand side, and the
               // double layer terms to the
               // matrix:
-              if (is_singular == false)
+              if ((is_singular == false) && (is_quasi_singular == false))
+              {
+                for (unsigned int q = 0; q < n_q_points; ++q)
                 {
-                  for (unsigned int q = 0; q < n_q_points; ++q)
-                    {
-                      const Tensor<1, dim> R = q_points[q] - support_points[i];
-                      LaplaceKernel::kernels(R, D, s);
-                      // if(support_points[i][0]==0.25&&support_points[i][1]==0.25)
-                      //   pcout<<"D "<<D<<" s "<<s<<" , ";
-                      for (unsigned int j = 0; j < fe->dofs_per_cell; ++j)
-                        {
-                          local_neumann_matrix_row_i(j) +=
-                            ((D * normals[q]) * fe_v.shape_value(j, q) *
-                             fe_v.JxW(q));
-                          local_dirichlet_matrix_row_i(j) +=
-                            (s * fe_v.shape_value(j, q) * fe_v.JxW(q));
-                        }
-                    }
+                  const Tensor<1, dim> R = q_points[q] - support_points[i];
+                  LaplaceKernel::kernels(R, D, s);
+                  // if(support_points[i][0]==0.25&&support_points[i][1]==0.25)
+                  //   pcout<<"D "<<D<<" s "<<s<<" , ";
+                  for (unsigned int j = 0; j < fe->dofs_per_cell; ++j)
+                  {
+                    local_neumann_matrix_row_i(j) +=
+                      ((D * normals[q]) * fe_v.shape_value(j, q) *
+                       fe_v.JxW(q));
+                    local_dirichlet_matrix_row_i(j) +=
+                      (s * fe_v.shape_value(j, q) * fe_v.JxW(q));
+                  }
                 }
+              }
+              else if(is_quasi_singular == true)
+              {
+                const Quadrature<dim - 1> quasi_singular_quadrature =
+                    get_quasi_singular_quadrature(cell, *mapping, singularity, ref_projection);
+//                Assert(quasi_singular_quadrature, ExcInternalError());
+
+                FEValues<dim - 1, dim> fe_v_quasi_singular(
+                    *mapping,
+                    *fe,
+                    quasi_singular_quadrature,
+                    update_jacobians | update_values | update_normal_vectors |
+                      update_quadrature_points);
+
+                fe_v_quasi_singular.reinit(cell);
+
+                const std::vector<Tensor<1, dim>> &quasi_singular_normals =
+                    fe_v_quasi_singular.get_normal_vectors();
+                const std::vector<Point<dim>> &quasi_singular_q_points =
+                    fe_v_quasi_singular.get_quadrature_points();
+
+                for (unsigned int q = 0; q < quasi_singular_quadrature.size(); ++q)
+                {
+                  const Tensor<1, dim> R = quasi_singular_q_points[q] - support_points[i];
+                  LaplaceKernel::kernels(R, D, s);
+
+                  for (unsigned int j = 0; j < fe->dofs_per_cell; ++j)
+                  {
+                    local_neumann_matrix_row_i(j) +=
+                      ((D * quasi_singular_normals[q]) *
+                       fe_v_quasi_singular.shape_value(j, q) *
+                       fe_v_quasi_singular.JxW(q));
+
+                    local_dirichlet_matrix_row_i(j) +=
+                      (s * fe_v_quasi_singular.shape_value(j, q) *
+                       fe_v_quasi_singular.JxW(q));
+                  }
+                }
+              }
               else
                 {
                   // Now we treat the more
@@ -4298,3 +3129,4 @@ BEMProblem<dim>::adaptive_refinement(
 
 template class BEMProblem<2>;
 template class BEMProblem<3>;
+              
