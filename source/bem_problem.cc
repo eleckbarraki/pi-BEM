@@ -1298,7 +1298,11 @@ BEMProblem<dim>::compute_hypersingular_free_coeffs()
 
   cell_it cell = dh.begin_active(), endc = dh.end();
   std::vector<types::global_dof_index> local_dof_indices(fe->dofs_per_cell);
-
+  
+  std::vector<Point<dim>> support_points(dh.n_dofs());
+  DoFTools::map_dofs_to_support_points<dim - 1, dim>(*mapping,
+                                                     dh,
+                                                     support_points);
 
   for (types::global_dof_index i = 0; i < dh.n_dofs();
        ++i) // these must now be the locally owned dofs. the rest should stay
@@ -1457,7 +1461,10 @@ BEMProblem<dim>::compute_hypersingular_free_coeffs()
           hyp_alpha(i) = geom_alpha;
 
           // just in case we need to check the code
-          pcout<<i<<"->      geom_alpha: "<<geom_alpha<<"	alpha(i): "<<alpha(i)<<endl; 
+          const Point<dim> refinement_center(0, 0, -1);
+          const double distance_from_center = refinement_center.distance(support_points[i]);
+          if (distance_from_center < 0.1)
+            pcout<<i<<"->      geom_alpha: "<<geom_alpha<<"	alpha(i): "<<alpha(i)<<endl; 
           // if (fabs(geom_alpha-alpha(i)) > 1e-3)
           //   pcout<<"HELP! 	fabs(geom_alpha-alpha(i)) > 1e-3"<<endl;
 
@@ -1618,148 +1625,148 @@ BEMProblem<dim>::compute_alpha(const double kappa)
   // original section, used in the last part
   static TrilinosWrappers::MPI::Vector ones, zeros, dum;
   if (ones.size() != dh.n_dofs())
-    {
-      ones.reinit(this_cpu_set, mpi_communicator);
-      vector_shift(ones, -1.);
-      zeros.reinit(this_cpu_set, mpi_communicator);
-      dum.reinit(this_cpu_set, mpi_communicator);
-    }
+  {
+    ones.reinit(this_cpu_set, mpi_communicator);
+    vector_shift(ones, -1.);
+    zeros.reinit(this_cpu_set, mpi_communicator);
+    dum.reinit(this_cpu_set, mpi_communicator);
+  }
   
   // Define static variables for function values and normal derivative
   static TrilinosWrappers::MPI::Vector function_coeff, normal_derivative_coeff; 
   static TrilinosWrappers::MPI::Vector tmp1, tmp2;
   
   if (function_coeff.size() != dh.n_dofs() || normal_derivative_coeff.size() != dh.n_dofs())
+  {
+    // Allocate vectors
+    function_coeff.reinit(this_cpu_set, mpi_communicator);
+    normal_derivative_coeff.reinit(this_cpu_set, mpi_communicator);
+    tmp1.reinit(this_cpu_set, mpi_communicator);
+    tmp2.reinit(this_cpu_set, mpi_communicator);
+      
+    // Support points of scalar and gradient DoFs
+    std::vector<Point<dim>> support_points(dh.n_dofs());
+    DoFTools::map_dofs_to_support_points<dim - 1, dim>(*mapping,
+                                                   dh,
+                                                   support_points);
+                                                   
+    std::vector<Point<dim>> vec_support_points(gradient_dh.n_dofs());
+    DoFTools::map_dofs_to_support_points<dim - 1, dim>(*mapping,
+                                                   gradient_dh,
+                                                   vec_support_points);                                               
+    
+    // Initialize FEValues for integration on each cell
+    cell_it cell = dh.begin_active(), endc = dh.end();
+    const unsigned int                   dofs_per_cell = fe->dofs_per_cell;
+    std::vector<types::global_dof_index> local_dof_indices(dofs_per_cell);
+    FEValues<dim - 1, dim>               fe_v(*mapping,
+                                *fe,
+                                *quadrature,
+                                update_values | update_normal_vectors |
+                                  update_quadrature_points | update_JxW_values);
+
+    // Define constant vector with components kappa/sqrt(3)
+	  // todo: invee che 3 ci metto dim?
+    const double inv_sqrt3 = 1.0 / std::sqrt(3.0);
+    Tensor<1,dim> kappa_vector;
+    for (unsigned int cc = 0; cc < dim; ++cc)
+  	  kappa_vector[cc] = kappa * inv_sqrt3;
+
+    // Loop over cells
+    for (cell = dh.begin_active(); cell != endc; ++cell)
     {
-      // Allocate vectors
-      function_coeff.reinit(this_cpu_set, mpi_communicator);
-      normal_derivative_coeff.reinit(this_cpu_set, mpi_communicator);
-      tmp1.reinit(this_cpu_set, mpi_communicator);
-      tmp2.reinit(this_cpu_set, mpi_communicator);
+      fe_v.reinit(cell);
       
-      // Support points of scalar and gradient DoFs
-      std::vector<Point<dim>> support_points(dh.n_dofs());
-      DoFTools::map_dofs_to_support_points<dim - 1, dim>(*mapping,
-                                                     dh,
-                                                     support_points);
-                                                     
-      std::vector<Point<dim>> vec_support_points(gradient_dh.n_dofs());
-      DoFTools::map_dofs_to_support_points<dim - 1, dim>(*mapping,
-                                                     gradient_dh,
-                                                     vec_support_points);                                               
+      // Retrieve DoF indices on this cell
+      cell->get_dof_indices(local_dof_indices);
       
-      // Initialize FEValues for integration on each cell
-      cell_it cell = dh.begin_active(), endc = dh.end();
-      const unsigned int                   dofs_per_cell = fe->dofs_per_cell;
-      std::vector<types::global_dof_index> local_dof_indices(dofs_per_cell);
-      FEValues<dim - 1, dim>               fe_v(*mapping,
-                                  *fe,
-                                  *quadrature,
-                                  update_values | update_normal_vectors |
-                                    update_quadrature_points | update_JxW_values);
-
-      // Define constant vector with components kappa/sqrt(3)
-	// todo: invee che 3 ci metto dim?
-      const double inv_sqrt3 = 1.0 / std::sqrt(3.0);
-      Tensor<1,dim> kappa_vector;
-      for (unsigned int cc = 0; cc < dim; ++cc)
-    	  kappa_vector[cc] = kappa * inv_sqrt3;
-
-      // Loop over cells
-      for (cell = dh.begin_active(); cell != endc; ++cell)
-        {
-          fe_v.reinit(cell);
-      
-          // Retrieve DoF indices on this cell
-          cell->get_dof_indices(local_dof_indices);
-          
-          // Loop over DoF indices on this cell
-          for (unsigned int j = 0; j < fe->dofs_per_cell; ++j)             
-            {              
-              // print dof coordinates
-              // std::cout << "i:  " << local_dof_indices[j] << "  sp:  " << support_points[local_dof_indices[j]] << endl;
+      // Loop over DoF indices on this cell
+      for (unsigned int j = 0; j < fe->dofs_per_cell; ++j)             
+      {              
+        // print dof coordinates
+        // std::cout << "i:  " << local_dof_indices[j] << "  sp:  " << support_points[local_dof_indices[j]] << endl;
               
-              // Normal vector (local_normal) and its norm (normy), initialized to zero
-              Tensor<1,dim> local_normal;
-              for (unsigned int ii = 0; ii < dim; ++ii)
-    		        local_normal[ii] = 0;
-    	      double normy        = 0;	        
+        // Normal vector (local_normal) and its norm (normy), initialized to zero
+        Tensor<1,dim> local_normal;
+        for (unsigned int ii = 0; ii < dim; ++ii)
+	        local_normal[ii] = 0;
+        double normy = 0;	        
               
-              // Sum of coordinates (x+y+z)
-              double sum = 0.0;
+        // Sum of coordinates (x+y+z)
+        double sum = 0.0;
               
-              // Take the reference to support_point to sum the components
-              const Point<dim> &punto = support_points[local_dof_indices[j]];
+        // Take the reference to support_point to sum the components
+        const Point<dim> &punto = support_points[local_dof_indices[j]];
                
-              // Loop over components of the current Dof
-              for (unsigned int d = 0; d < dim; ++d)
-                {
-                  // Map indices between subdivided and original systems (to obtain vec_index)
-                  types::global_dof_index dummy =
-                    sub_wise_to_original[local_dof_indices[j]];
+        // Loop over components of the current Dof
+        for (unsigned int d = 0; d < dim; ++d)
+        {
+          // Map indices between subdivided and original systems (to obtain vec_index)
+          types::global_dof_index dummy =
+            sub_wise_to_original[local_dof_indices[j]];
                   
-                  types::global_dof_index vec_index =
-                    vec_original_to_sub_wise
-                      [gradient_dh.n_dofs() / dim * d +
-                       dummy]; 
+          types::global_dof_index vec_index =
+            vec_original_to_sub_wise
+              [gradient_dh.n_dofs() / dim * d +
+               dummy]; 
 
-                  // Consistency check
-                  Assert(
-                    vector_this_cpu_set.is_element(vec_index),
-                    ExcMessage(
-                      "vector cpu set and cpu set are inconsistent"));
+          // Consistency check
+          Assert(
+            vector_this_cpu_set.is_element(vec_index),
+            ExcMessage(
+              "vector cpu set and cpu set are inconsistent"));
                   
-                  // Sum the components of the DoF (x+y+z)
-                  sum += punto[d];    
-                  
-                  // Build local_normal component by component  
-                  normy += vector_normals_solution[vec_index] *
-                                 vector_normals_solution[vec_index];
-                  local_normal[d] = vector_normals_solution[vec_index];
-                }
-              
-              // normalize the normal vector (just to be sure)
-              // local_normal = local_normal; / std::sqrt(normy);
-              
-              // Function value: exp(-kappa/sqrt(3) * (x+y+z))
-              function_coeff(local_dof_indices[j]) = std::exp(- kappa * inv_sqrt3 * sum);
-              
-              // Normal derivative: -function * kappa_vector * normal vector
-              normal_derivative_coeff(local_dof_indices[j]) = kappa_vector * local_normal;
-              normal_derivative_coeff(local_dof_indices[j]) *= -function_coeff(local_dof_indices[j]);
-              
-              // print normal to the dof
-              // std::cout << "	normal:  " << local_normal << endl; 
-            }  
+          // Sum the components of the DoF (x+y+z)
+          sum += punto[d];    
+          
+          // Build local_normal component by component  
+          normy += vector_normals_solution[vec_index] *
+                         vector_normals_solution[vec_index];
+          local_normal[d] = vector_normals_solution[vec_index];
         }
+              
+        // normalize the normal vector (just to be sure)
+        // local_normal = local_normal; / std::sqrt(normy);
+        
+        // Function value: exp(-kappa/sqrt(3) * (x+y+z))
+        function_coeff(local_dof_indices[j]) = std::exp(- kappa * inv_sqrt3 * sum);
+        
+        // Normal derivative: -function * kappa_vector * normal vector
+        normal_derivative_coeff(local_dof_indices[j]) = kappa_vector * local_normal;
+        normal_derivative_coeff(local_dof_indices[j]) *= -function_coeff(local_dof_indices[j]);
+        
+        // print normal to the dof
+        // std::cout << "	normal:  " << local_normal << endl; 
+      }  
     }
+  }
   
   // Compute alpha depending on solver type  
   if (solution_method == "Direct")
-    {
-      // Multiply coefficients and Newmann and Dirichlet matrices
-      neumann_matrix.vmult(tmp1, function_coeff);
-      dirichlet_matrix.vmult(tmp2, normal_derivative_coeff);
+  {
+    // Multiply coefficients and Newmann and Dirichlet matrices
+    neumann_matrix.vmult(tmp1, function_coeff);
+    dirichlet_matrix.vmult(tmp2, normal_derivative_coeff);
 
-      // alpha = (-tmp1 - tmp2) / function_coeff
-      alpha.reinit(this_cpu_set, mpi_communicator);
-      alpha  = tmp2;
-      alpha -= tmp1;
+    // alpha = (-tmp1 - tmp2) / function_coeff
+    alpha.reinit(this_cpu_set, mpi_communicator);
+    alpha  = tmp2;
+    alpha -= tmp1;
       
-      for (unsigned int ii = 0; ii < alpha.size(); ++ii)
-        { 
-          if (this_cpu_set.is_element(ii))
-          	alpha[ii] /= function_coeff[ii];
-        }
-      
+    for (unsigned int ii = 0; ii < alpha.size(); ++ii)
+    { 
+      if (this_cpu_set.is_element(ii))
+      	alpha[ii] /= function_coeff[ii];
     }
+      
+  }
   else
-    {
-      AssertThrow(dim == 3, ExcMessage("FMA only works in 3D"));
+  {
+    AssertThrow(dim == 3, ExcMessage("FMA only works in 3D"));
 
-      fma.generate_multipole_expansions(ones, zeros);
-      fma.multipole_matr_vect_products(ones, zeros, alpha, dum);
-    }
+    fma.generate_multipole_expansions(ones, zeros);
+    fma.multipole_matr_vect_products(ones, zeros, alpha, dum);
+  }
 
 // alpha.print(pcout);
 // for (unsigned int i=0; i<alpha.size(); ++i)

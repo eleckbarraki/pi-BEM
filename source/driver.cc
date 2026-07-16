@@ -90,10 +90,12 @@ Driver<dim>::run()
       if (global_refinement)
         {
           computational_domain.refine_and_resize(computational_domain.n_cycles);
+          //computational_domain.conditional_refine_and_resize(computational_domain.n_cycles);
         }
       else
         {
-          // computational_domain.conditional_refine_and_resize(1);
+          //computational_domain.conditional_refine_and_resize(computational_domain.n_cycles);
+          //local_refinement_cycles = 0;
           computational_domain.refine_and_resize(
             computational_domain.pre_global_refinements);
           local_refinement_cycles = computational_domain.n_cycles;

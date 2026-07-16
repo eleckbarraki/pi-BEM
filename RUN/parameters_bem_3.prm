@@ -21,7 +21,7 @@ subsection BEMProblem<3>
   set Preconditioner                  = ILU
   set Solution method                 = Direct
   set Kernel type                     = screened
-  set Screened Kappa                  = 4
+  set Screened Kappa                  = 0.5
 
   subsection Grid Refinement
     set Coarsening threshold = 0.03
@@ -29,9 +29,9 @@ subsection BEMProblem<3>
   end
 
   subsection Quadrature rules
-    set Quadrature order          = 20
+    set Quadrature order          = 10
     set Quadrature type           = gauss
-    set Singular quadrature order = 21
+    set Singular quadrature order = 11
   end
 
   subsection Scalar Finite Element
@@ -70,7 +70,7 @@ subsection BoundaryConditions<3>
     # formula. (That said, for convenience this class actually defines both
     # `pi' and `Pi' by default, but you get the idea.)
     # set Function constants  =
-    set Function constants  = kappa=4
+    set Function constants  = kappa=0.5
 
     # The formula that denotes the function you want to evaluate for
     # particular values of the independent variables. This expression may
@@ -113,7 +113,7 @@ subsection BoundaryConditions<3>
     # formula. (That said, for convenience this class actually defines both
     # `pi' and `Pi' by default, but you get the idea.)
     # set Function constants  =
-    set Function constants  = kappa=4
+    set Function constants  = kappa=0.5
 
     # The formula that denotes the function you want to evaluate for
     # particular values of the independent variables. This expression may
@@ -156,7 +156,7 @@ subsection BoundaryConditions<3>
     # formula. (That said, for convenience this class actually defines both
     # `pi' and `Pi' by default, but you get the idea.)
     # set Function constants  = 
-    set Function constants  = kappa=4
+    set Function constants  = kappa=0.5
 
     # The formula that denotes the function you want to evaluate for
     # particular values of the independent variables. This expression may
@@ -199,7 +199,7 @@ subsection BoundaryConditions<3>
     # formula. (That said, for convenience this class actually defines both
     # `pi' and `Pi' by default, but you get the idea.)
     # set Function constants  = 
-    set Function constants  = kappa=4
+    set Function constants  = kappa=0.5
 
     # The formula that denotes the function you want to evaluate for
     # particular values of the independent variables. This expression may
@@ -235,9 +235,9 @@ end
 
 
 subsection ComputationalDomain<3>
-  set Axis x dimension                                                         = 2.
-  set Axis y dimension                                                         = 3.
-  set Axis z dimension                                                         = 4.
+  set Axis x dimension                                                         = 1.
+  set Axis y dimension                                                         = 1.
+  set Axis z dimension                                                         = 1.
   set Cad tolerance to projectors tolerance ratio                              = 100
   set Cells per circle                                                         = 12
   set Input grid format                                                        = inp
@@ -245,15 +245,15 @@ subsection ComputationalDomain<3>
   set Input path to CAD files                                                  = ./
   set Max aspect ratio                                                         = 3.5
   set Maximum number of curvature adaptive refinement cycles                   = 5
-  set Number of cycles                                                         = 2
+  set Number of cycles                                                         = 4
   set Number of global refinement to be executed before local refinement cycle = 0
   set Surface curvature adaptive refinement                                    = false
   set Use a spheroid                                                           = false
-  set Use iges surfaces and curves                                             = false
+  set Use iges surfaces and curves                                             = true   #default: false
 
 
   subsection Boundary Conditions ID Numbers
-    set Dirichlet boundary ids = 2,3,110,110
+    set Dirichlet boundary ids = 1,2,3,110,110  # if coarse sphere double nodes: 1,2,3
     set Neumann boundary ids   = 110,110
   end
 
@@ -261,7 +261,7 @@ end
 
 
 subsection Driver<3>
-  set Set Global Refinement = true
+  set Set Global Refinement = true #if not conditional_refinement: true
 end
 
 
