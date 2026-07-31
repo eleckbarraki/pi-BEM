@@ -11,6 +11,8 @@
 #include "../include/laplace_kernel.h"
 #include "../include/screened_kernel.h"
 #include "../include/singular_kernel_integral.h"
+#include "../include/quasi_singular_kernel_integral.h"
+#include "../include/telles_quadrature.h"
 #include "Teuchos_TimeMonitor.hpp"
 
 using Teuchos::RCP;
@@ -456,6 +458,39 @@ BEMProblem<2>::get_singular_quadrature(const unsigned int index) const
   return quadratures[index];
 }
 
+
+template <>
+const Quadrature<2>
+BEMProblem<3>::get_quasi_singular_quadrature(const typename DoFHandler<2,3>::active_cell_iterator &cell,
+                                              const Mapping<2,3> &mapping,
+                                              const Point<3> &singularity,
+                                              const Point<2> &ref_projection) const
+{
+  return telles_quadrature(
+        cell,
+        mapping,
+        singularity,
+        ref_projection,
+        quadrature_order,
+        2);
+}
+
+template <>
+const Quadrature<1>
+BEMProblem<2>::get_quasi_singular_quadrature(const typename DoFHandler<1,2>::active_cell_iterator &cell,
+                                              const Mapping<1,2> &mapping,
+                                              const Point<2> &singularity,
+                                              const Point<1> &ref_projection) const
+{
+  return telles_quadrature(
+        cell,
+        mapping,
+        singularity,
+        ref_projection,
+        quadrature_order,
+        2);
+}
+
 template <int dim>
 void
 BEMProblem<dim>::declare_parameters(ParameterHandler &prm)
@@ -869,17 +904,38 @@ BEMProblem<dim>::assemble_system()
               local_neumann_matrix_row_i   = 0;
               local_dirichlet_matrix_row_i = 0;
 
+              Point<dim> singularity = support_points[i];
+              Point<dim-1> ref_projection(0.0,0.0);
               bool         is_singular    = false;
               unsigned int singular_index = numbers::invalid_unsigned_int;
 
               for (unsigned int j = 0; j < fe->dofs_per_cell; ++j)
                 // if(local_dof_indices[j] == i)
                 if (double_nodes_set[i].count(local_dof_indices[j]) > 0)
-                  {
-                    singular_index = j;
-                    is_singular    = true;
-                    break;
-                  }
+                {
+                  singular_index = j;
+                  is_singular    = true;
+                  break;
+                }
+
+              bool is_quasi_singular = false;
+              if (is_singular == false)
+              {
+                Point<dim> singularity = support_points[i];
+                double dist_to_center = (singularity - cell->center()).norm();
+                double h = cell->diameter();
+                if(dist_to_center - 0.5*h < 0.1)
+                {
+                  QuasiSingularKernelIntegral<dim> qski(cell, *fe, *mapping, singularity);
+                  ref_projection = qski.get_closest_reference_point();
+                  double dist_to_cell = qski.min_distance;
+                  
+                  double distance_ratio = dist_to_cell / cell->diameter();
+                  if(distance_ratio < 0.6)
+                    is_quasi_singular = true;
+                }
+
+              }
 
               // We then perform the
               // integral. If the index $i$
@@ -890,29 +946,68 @@ BEMProblem<dim>::assemble_system()
               // right hand side, and the
               // double layer terms to the
               // matrix:
-              if (is_singular == false)
+              if ((is_singular == false) && (is_quasi_singular == false))
+              {
+                for (unsigned int q = 0; q < n_q_points; ++q)
                 {
-                  for (unsigned int q = 0; q < n_q_points; ++q)
-                    {
-                      const Tensor<1, dim> R = q_points[q] - support_points[i];
-                      if (kernel_type == "laplace")
-                        LaplaceKernel::kernels(R, D, s);
-                      else if (kernel_type == "screened")
-                        ScreenedKernel::kernels(R, D, s, screened_kappa);
-                      else
-                        AssertThrow(false, ExcMessage("Unknown kernel type: " + kernel_type));
-                      // if(support_points[i][0]==0.25&&support_points[i][1]==0.25)
-                      //   pcout<<"D "<<D<<" s "<<s<<" , ";
-                      for (unsigned int j = 0; j < fe->dofs_per_cell; ++j)
-                        {
-                          local_neumann_matrix_row_i(j) +=
-                            ((D * normals[q]) * fe_v.shape_value(j, q) *
-                             fe_v.JxW(q));
-                          local_dirichlet_matrix_row_i(j) +=
-                            (s * fe_v.shape_value(j, q) * fe_v.JxW(q));
-                        }
-                    }
+                  const Tensor<1, dim> R = q_points[q] - support_points[i];
+                  if (kernel_type == "laplace")
+                    LaplaceKernel::kernels(R, D, s);
+                  else if (kernel_type == "screened")
+                    ScreenedKernel::kernels(R, D, s, screened_kappa);
+                  else
+                    AssertThrow(false, ExcMessage("Unknown kernel type: " + kernel_type));
+                  // if(support_points[i][0]==0.25&&support_points[i][1]==0.25)
+                  //   pcout<<"D "<<D<<" s "<<s<<" , ";
+                  for (unsigned int j = 0; j < fe->dofs_per_cell; ++j)
+                  {
+                    local_neumann_matrix_row_i(j) +=
+                      ((D * normals[q]) * fe_v.shape_value(j, q) *
+                        fe_v.JxW(q));
+                    local_dirichlet_matrix_row_i(j) +=
+                      (s * fe_v.shape_value(j, q) * fe_v.JxW(q));
+                  }
                 }
+              }
+              else if(is_quasi_singular == true)
+              {
+                pcout << cell << "  " << singularity << " --> the quadrature is quasi singular" << std::endl;
+                const Quadrature<dim - 1> quasi_singular_quadrature =
+                    get_quasi_singular_quadrature(cell, *mapping, singularity, ref_projection);
+//                Assert(quasi_singular_quadrature, ExcInternalError());
+
+                FEValues<dim - 1, dim> fe_v_quasi_singular(
+                    *mapping,
+                    *fe,
+                    quasi_singular_quadrature,
+                    update_jacobians | update_values | update_normal_vectors |
+                      update_quadrature_points);
+
+                fe_v_quasi_singular.reinit(cell);
+
+                const std::vector<Tensor<1, dim>> &quasi_singular_normals =
+                    fe_v_quasi_singular.get_normal_vectors();
+                const std::vector<Point<dim>> &quasi_singular_q_points =
+                    fe_v_quasi_singular.get_quadrature_points();
+
+                for (unsigned int q = 0; q < quasi_singular_quadrature.size(); ++q)
+                {
+                  const Tensor<1, dim> R = quasi_singular_q_points[q] - support_points[i];
+                  LaplaceKernel::kernels(R, D, s);
+
+                  for (unsigned int j = 0; j < fe->dofs_per_cell; ++j)
+                  {
+                    local_neumann_matrix_row_i(j) +=
+                      ((D * quasi_singular_normals[q]) *
+                       fe_v_quasi_singular.shape_value(j, q) *
+                       fe_v_quasi_singular.JxW(q));
+
+                    local_dirichlet_matrix_row_i(j) +=
+                      (s * fe_v_quasi_singular.shape_value(j, q) *
+                       fe_v_quasi_singular.JxW(q));
+                  }
+                }
+              }              
               else
                 {
                   // Now we treat the more
@@ -1267,7 +1362,7 @@ template <int dim>
 void
 BEMProblem<dim>::compute_hypersingular_free_coeffs()
 {
-  pcout << "Computing free cefficients for hypersingular BIE" << std::endl;
+  pcout << "Computing free coefficients for hypersingular BIE" << std::endl;
 
   pcout << "Computing C_ij tensor" << endl;
 
@@ -1293,8 +1388,6 @@ BEMProblem<dim>::compute_hypersingular_free_coeffs()
                                           update_normal_vectors |
                                           update_jacobians |
                                           update_jacobian_grads);
-
-
 
   cell_it cell = dh.begin_active(), endc = dh.end();
   std::vector<types::global_dof_index> local_dof_indices(fe->dofs_per_cell);
@@ -1463,8 +1556,8 @@ BEMProblem<dim>::compute_hypersingular_free_coeffs()
           // just in case we need to check the code
           const Point<dim> refinement_center(0, 0, -1);
           const double distance_from_center = refinement_center.distance(support_points[i]);
-          if (distance_from_center < 0.1)
-            pcout<<i<<"->      geom_alpha: "<<geom_alpha<<"	alpha(i): "<<alpha(i)<<endl; 
+          if (true)//(distance_from_center < 0.1)
+            pcout<<i << " " << support_points[i] <<"->      geom_alpha: "<<geom_alpha<<"	alpha(i): "<<alpha(i)<<endl; 
           // if (fabs(geom_alpha-alpha(i)) > 1e-3)
           //   pcout<<"HELP! 	fabs(geom_alpha-alpha(i)) > 1e-3"<<endl;
 

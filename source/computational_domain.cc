@@ -918,7 +918,7 @@ ComputationalDomain<dim>::refine_and_resize(const unsigned int refinement_level)
       for (unsigned int v = 0; v < GeometryInfo<dim - 1>::vertices_per_cell; ++v)
       {
         const double distance_from_center = refinement_center.distance(cell->vertex(v));
-        if (distance_from_center < 0.1)
+        if (distance_from_center < 0.2)
         {
           cell->set_refine_flag();
           break;
