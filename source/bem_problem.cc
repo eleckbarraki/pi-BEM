@@ -931,7 +931,7 @@ BEMProblem<dim>::assemble_system()
                   double dist_to_cell = qski.min_distance;
                   
                   double distance_ratio = dist_to_cell / cell->diameter();
-                  if(distance_ratio < 0.6)
+                  if(distance_ratio < 0.1)
                     is_quasi_singular = true;
                 }
 
@@ -971,7 +971,7 @@ BEMProblem<dim>::assemble_system()
               }
               else if(is_quasi_singular == true)
               {
-                pcout << cell << "  " << singularity << " --> the quadrature is quasi singular" << std::endl;
+                pcout << cell << " \t s: " << singularity << "\t \t --> the quadrature is quasi singular" << std::endl;
                 const Quadrature<dim - 1> quasi_singular_quadrature =
                     get_quasi_singular_quadrature(cell, *mapping, singularity, ref_projection);
 //                Assert(quasi_singular_quadrature, ExcInternalError());
@@ -1557,7 +1557,7 @@ BEMProblem<dim>::compute_hypersingular_free_coeffs()
           const Point<dim> refinement_center(0, 0, -1);
           const double distance_from_center = refinement_center.distance(support_points[i]);
           if (true)//(distance_from_center < 0.1)
-            pcout<<i << " " << support_points[i] <<"->      geom_alpha: "<<geom_alpha<<"	alpha(i): "<<alpha(i)<<endl; 
+            pcout<<i << " \t" << support_points[i] <<"->\t geom_alpha: "<<geom_alpha<<" \t alpha(i): "<<alpha(i)<<endl; 
           // if (fabs(geom_alpha-alpha(i)) > 1e-3)
           //   pcout<<"HELP! 	fabs(geom_alpha-alpha(i)) > 1e-3"<<endl;
 
@@ -1725,6 +1725,11 @@ BEMProblem<dim>::compute_alpha(const double kappa)
     dum.reinit(this_cpu_set, mpi_communicator);
   }
   
+  // hanging node constraints matrix
+  AffineConstraints<double> c_hn;
+  DoFTools::make_hanging_node_constraints(dh, c_hn);
+  c_hn.close();
+  
   // Define static variables for function values and normal derivative
   static TrilinosWrappers::MPI::Vector function_coeff, normal_derivative_coeff; 
   static TrilinosWrappers::MPI::Vector tmp1, tmp2;
@@ -1778,6 +1783,10 @@ BEMProblem<dim>::compute_alpha(const double kappa)
       {              
         // print dof coordinates
         // std::cout << "i:  " << local_dof_indices[j] << "  sp:  " << support_points[local_dof_indices[j]] << endl;
+
+        // skip hanging nodes
+        if (c_hn.is_constrained(local_dof_indices[j]))
+          continue;
               
         // Normal vector (local_normal) and its norm (normy), initialized to zero
         Tensor<1,dim> local_normal;
@@ -1860,6 +1869,9 @@ BEMProblem<dim>::compute_alpha(const double kappa)
     fma.generate_multipole_expansions(ones, zeros);
     fma.multipole_matr_vect_products(ones, zeros, alpha, dum);
   }
+  
+  // fill hanging node values by interpolating from master dofs
+  c_hn.distribute(alpha);
 
 // alpha.print(pcout);
 // for (unsigned int i=0; i<alpha.size(); ++i)

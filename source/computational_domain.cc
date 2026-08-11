@@ -906,30 +906,63 @@ ComputationalDomain<dim>::refine_and_resize(const unsigned int refinement_level)
     }
   //*/
   
-  //////////  
-  // if you want to refine around a point
-  const Point<dim> refinement_center(0, 0, -1);
-  for (unsigned int step = 0; step < refinement_level; ++step)
+  if( input_grid_name == "../grids/sphere_box_flipped" ||
+      input_grid_name == "../grids/sphere_box_flipped_double_nodes" ||
+      input_grid_name == "../grids/sphere_box_flipped_new")
   {
-    Triangulation<2, 3>::active_cell_iterator cell = tria.begin_active();
-    Triangulation<2, 3>::active_cell_iterator endc = tria.end();
-    for (; cell != endc; ++cell)
+    //////////  
+    // if you want to refine around a point
+    // first do one pass of global refinement
+    tria.refine_global(1);
+    
+    // refine only bottom face of the box around (0,0,-1.003)
+    const Point<dim> refinement_center(0, 0, -1);
+    for (unsigned int step = 0; step < 4; ++step)
     {
-      for (unsigned int v = 0; v < GeometryInfo<dim - 1>::vertices_per_cell; ++v)
+      Triangulation<2, 3>::active_cell_iterator cell = tria.begin_active();
+      Triangulation<2, 3>::active_cell_iterator endc = tria.end();
+      for (; cell != endc; ++cell)
       {
-        const double distance_from_center = refinement_center.distance(cell->vertex(v));
-        if (distance_from_center < 0.2)
+        for (unsigned int v = 0; v < GeometryInfo<dim - 1>::vertices_per_cell; ++v)
         {
-          cell->set_refine_flag();
-          break;
+          const double distance_from_center = refinement_center.distance(cell->vertex(v));
+          if((int(cell->material_id()) == 3) && (distance_from_center < 0.2))
+            cell->set_refine_flag();
         }
       }
+      tria.prepare_coarsening_and_refinement();
+      tria.execute_coarsening_and_refinement();
+      make_edges_conformal();
     }
-    tria.prepare_coarsening_and_refinement();
-    tria.execute_coarsening_and_refinement();
-    make_edges_conformal();
+    
+    // refine everything around (0,0,-1.003)
+    for (unsigned int step = 0; step < refinement_level; ++step)
+    {
+      Triangulation<2, 3>::active_cell_iterator cell = tria.begin_active();
+      Triangulation<2, 3>::active_cell_iterator endc = tria.end();
+      for (; cell != endc; ++cell)
+      {
+        for (unsigned int v = 0; v < GeometryInfo<dim - 1>::vertices_per_cell; ++v)
+        {
+          const double distance_from_center = refinement_center.distance(cell->vertex(v));
+          if (distance_from_center < 0.2)
+          {
+            cell->set_refine_flag();
+            break;
+          }
+        }
+      }
+      tria.prepare_coarsening_and_refinement();
+      tria.execute_coarsening_and_refinement();
+      make_edges_conformal();
+    }
+
+    //////////
   }
-  //////////
+  else
+  {
+    tria.refine_global(refinement_level);
+  }
   
   // else just do the global refinement  
   //tria.refine_global(refinement_level);
