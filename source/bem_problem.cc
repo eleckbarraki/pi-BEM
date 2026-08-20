@@ -923,14 +923,14 @@ BEMProblem<dim>::assemble_system()
           Point<dim> singularity = support_points[i];
           double dist_to_center = (singularity - cell->center()).norm();
           double h = cell->diameter();
-          if(dist_to_center - 0.5*h < 0.001)
+          if(dist_to_center - 0.5*h < 0.5)
           {
             QuasiSingularKernelIntegral<dim> qski(cell, *fe, *mapping, singularity);
             ref_projection = qski.get_closest_reference_point();
             double dist_to_cell = qski.min_distance;
             
             double distance_ratio = dist_to_cell / cell->diameter();
-            if(distance_ratio < 10)
+            if(distance_ratio < 12)
               is_quasi_singular = true;
           }
 
@@ -2009,9 +2009,15 @@ BEMProblem<dim>::solve_system(TrilinosWrappers::MPI::Vector       &phi,
   system_rhs = 0;
   sol        = 0;
   alpha      = 0;
+  
+  
+  if (kernel_type == "laplace")
+    compute_alpha();
+  else if (kernel_type == "screened")
+    compute_alpha(screened_kappa);
+  else
+    AssertThrow(false, ExcMessage("Unknown kernel type: " + kernel_type));
 
-
-  compute_alpha(screened_kappa);
   compute_hypersingular_free_coeffs();
   // alpha = hyp_alpha;
   //   for (unsigned int i = 0; i < alpha.size(); i++)
