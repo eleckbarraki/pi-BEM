@@ -581,7 +581,7 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
   // singularity5: (0.984375, 0.0307617, 0.003125);
   Point<dim> target_singularity;
   if (dim == 3)
-    target_singularity = Point<dim>(0.96875, 0.0605469, 0.00625);
+    target_singularity = Point<dim>(0.0, 0.0, -1.003);
   else if (dim == 2)
     target_singularity = Point<dim>(0.625, 0.04);
 
@@ -700,14 +700,14 @@ double BEMProblem<dim>::compute_boundary_area_with_spherical_coordinates()
       {
         double dist_to_center = (singularity - cell->center()).norm();
         double h = cell->diameter();
-        if(dist_to_center - 0.5*h < 0.1)
+        if(dist_to_center - 0.5*h < 0.5)
         {
           QuasiSingularKernelIntegral<dim> qski(cell, *fe, *mapping, singularity);
           qsing_to_use = qski.get_closest_reference_point();
           double dist_to_cell = qski.min_distance;
           
           distance_to_singularity_ratio = dist_to_cell / cell->diameter();
-          if(distance_to_singularity_ratio < 0.6)
+          if(distance_to_singularity_ratio < 15)
             quasi_sing_cell = true;
         }
       }

@@ -137,10 +137,10 @@ Quadrature<2> telles_quadrature(
   QGauss<1> gauss_1d(quadrature_order);
   const unsigned int n = gauss_1d.size();
 
-  std::vector<Point<2>>  points(n*n);
-  std::vector<double>    weights(n*n);
-//  points.reserve(n*n);
-//  weights.reserve(n*n);
+  std::vector<Point<2>>  points;
+  std::vector<double>    weights;
+  points.reserve(n*n);
+  weights.reserve(n*n);
 
   for (unsigned int i = 0; i < n; ++i)
   {
