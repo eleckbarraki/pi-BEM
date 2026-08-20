@@ -245,7 +245,7 @@ subsection ComputationalDomain<3>
   set Input path to CAD files                                                  = ./
   set Max aspect ratio                                                         = 3.5
   set Maximum number of curvature adaptive refinement cycles                   = 5
-  set Number of cycles                                                         = 4
+  set Number of cycles                                                         = 3
   set Number of global refinement to be executed before local refinement cycle = 0
   set Surface curvature adaptive refinement                                    = false
   set Use a spheroid                                                           = true

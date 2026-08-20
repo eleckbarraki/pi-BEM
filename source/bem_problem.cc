@@ -872,418 +872,422 @@ BEMProblem<dim>::assemble_system()
   double     s;
 
   for (cell = dh.begin_active(); cell != endc; ++cell)
+  {
+    fe_v.reinit(cell);
+    cell->get_dof_indices(local_dof_indices);
+
+    const std::vector<Point<dim>> &q_points    = fe_v.get_quadrature_points();
+    const std::vector<Tensor<1, dim>> &normals = fe_v.get_normal_vectors();
+
+    // We then form the integral over
+    // the current cell for all
+    // degrees of freedom (note that
+    // this includes degrees of
+    // freedom not located on the
+    // current cell, a deviation from
+    // the usual finite element
+    // integrals). The integral that
+    // we need to perform is singular
+    // if one of the local degrees of
+    // freedom is the same as the
+    // support point $i$. A the
+    // beginning of the loop we
+    // therefore check wether this is
+    // the case, and we store which
+    // one is the singular index.
+    // We do the same for quasi singular cells.
+    for (types::global_dof_index i = 0; i < dh.n_dofs(); ++i) // these must now be the locally owned dofs. the rest should stay the same
     {
-      fe_v.reinit(cell);
-      cell->get_dof_indices(local_dof_indices);
+      if (this_cpu_set.is_element(i))
+      {
+        local_neumann_matrix_row_i   = 0;
+        local_dirichlet_matrix_row_i = 0;
 
-      const std::vector<Point<dim>> &q_points    = fe_v.get_quadrature_points();
-      const std::vector<Tensor<1, dim>> &normals = fe_v.get_normal_vectors();
+        Point<dim> singularity = support_points[i];
+        Point<dim-1> ref_projection(0.0,0.0);
+        bool         is_singular    = false;
+        unsigned int singular_index = numbers::invalid_unsigned_int;
 
-      // We then form the integral over
-      // the current cell for all
-      // degrees of freedom (note that
-      // this includes degrees of
-      // freedom not located on the
-      // current cell, a deviation from
-      // the usual finite element
-      // integrals). The integral that
-      // we need to perform is singular
-      // if one of the local degrees of
-      // freedom is the same as the
-      // support point $i$. A the
-      // beginning of the loop we
-      // therefore check wether this is
-      // the case, and we store which
-      // one is the singular index:
-      for (types::global_dof_index i = 0; i < dh.n_dofs();
-           ++i) // these must now be the locally owned dofs. the rest should
-                // stay the same
+        for (unsigned int j = 0; j < fe->dofs_per_cell; ++j)
+          // if(local_dof_indices[j] == i)
+          if (double_nodes_set[i].count(local_dof_indices[j]) > 0)
+          {
+            singular_index = j;
+            is_singular    = true;
+            break;
+          }
+
+        bool is_quasi_singular = false;
+        if (is_singular == false)
         {
-          if (this_cpu_set.is_element(i))
-            {
-              local_neumann_matrix_row_i   = 0;
-              local_dirichlet_matrix_row_i = 0;
+          Point<dim> singularity = support_points[i];
+          double dist_to_center = (singularity - cell->center()).norm();
+          double h = cell->diameter();
+          if(dist_to_center - 0.5*h < 0.001)
+          {
+            QuasiSingularKernelIntegral<dim> qski(cell, *fe, *mapping, singularity);
+            ref_projection = qski.get_closest_reference_point();
+            double dist_to_cell = qski.min_distance;
+            
+            double distance_ratio = dist_to_cell / cell->diameter();
+            if(distance_ratio < 10)
+              is_quasi_singular = true;
+          }
 
-              Point<dim> singularity = support_points[i];
-              Point<dim-1> ref_projection(0.0,0.0);
-              bool         is_singular    = false;
-              unsigned int singular_index = numbers::invalid_unsigned_int;
-
-              for (unsigned int j = 0; j < fe->dofs_per_cell; ++j)
-                // if(local_dof_indices[j] == i)
-                if (double_nodes_set[i].count(local_dof_indices[j]) > 0)
-                {
-                  singular_index = j;
-                  is_singular    = true;
-                  break;
-                }
-
-              bool is_quasi_singular = false;
-              if (is_singular == false)
-              {
-                Point<dim> singularity = support_points[i];
-                double dist_to_center = (singularity - cell->center()).norm();
-                double h = cell->diameter();
-                if(dist_to_center - 0.5*h < 0.1)
-                {
-                  QuasiSingularKernelIntegral<dim> qski(cell, *fe, *mapping, singularity);
-                  ref_projection = qski.get_closest_reference_point();
-                  double dist_to_cell = qski.min_distance;
-                  
-                  double distance_ratio = dist_to_cell / cell->diameter();
-                  if(distance_ratio < 0.1)
-                    is_quasi_singular = true;
-                }
-
-              }
-
-              // We then perform the
-              // integral. If the index $i$
-              // is not one of the local
-              // degrees of freedom, we
-              // simply have to add the
-              // single layer terms to the
-              // right hand side, and the
-              // double layer terms to the
-              // matrix:
-              if ((is_singular == false) && (is_quasi_singular == false))
-              {
-                for (unsigned int q = 0; q < n_q_points; ++q)
-                {
-                  const Tensor<1, dim> R = q_points[q] - support_points[i];
-                  if (kernel_type == "laplace")
-                    LaplaceKernel::kernels(R, D, s);
-                  else if (kernel_type == "screened")
-                    ScreenedKernel::kernels(R, D, s, screened_kappa);
-                  else
-                    AssertThrow(false, ExcMessage("Unknown kernel type: " + kernel_type));
-                  // if(support_points[i][0]==0.25&&support_points[i][1]==0.25)
-                  //   pcout<<"D "<<D<<" s "<<s<<" , ";
-                  for (unsigned int j = 0; j < fe->dofs_per_cell; ++j)
-                  {
-                    local_neumann_matrix_row_i(j) +=
-                      ((D * normals[q]) * fe_v.shape_value(j, q) *
-                        fe_v.JxW(q));
-                    local_dirichlet_matrix_row_i(j) +=
-                      (s * fe_v.shape_value(j, q) * fe_v.JxW(q));
-                  }
-                }
-              }
-              else if(is_quasi_singular == true)
-              {
-                pcout << cell << " \t s: " << singularity << "\t \t --> the quadrature is quasi singular" << std::endl;
-                const Quadrature<dim - 1> quasi_singular_quadrature =
-                    get_quasi_singular_quadrature(cell, *mapping, singularity, ref_projection);
-//                Assert(quasi_singular_quadrature, ExcInternalError());
-
-                FEValues<dim - 1, dim> fe_v_quasi_singular(
-                    *mapping,
-                    *fe,
-                    quasi_singular_quadrature,
-                    update_jacobians | update_values | update_normal_vectors |
-                      update_quadrature_points);
-
-                fe_v_quasi_singular.reinit(cell);
-
-                const std::vector<Tensor<1, dim>> &quasi_singular_normals =
-                    fe_v_quasi_singular.get_normal_vectors();
-                const std::vector<Point<dim>> &quasi_singular_q_points =
-                    fe_v_quasi_singular.get_quadrature_points();
-
-                for (unsigned int q = 0; q < quasi_singular_quadrature.size(); ++q)
-                {
-                  const Tensor<1, dim> R = quasi_singular_q_points[q] - support_points[i];
-                  LaplaceKernel::kernels(R, D, s);
-
-                  for (unsigned int j = 0; j < fe->dofs_per_cell; ++j)
-                  {
-                    local_neumann_matrix_row_i(j) +=
-                      ((D * quasi_singular_normals[q]) *
-                       fe_v_quasi_singular.shape_value(j, q) *
-                       fe_v_quasi_singular.JxW(q));
-
-                    local_dirichlet_matrix_row_i(j) +=
-                      (s * fe_v_quasi_singular.shape_value(j, q) *
-                       fe_v_quasi_singular.JxW(q));
-                  }
-                }
-              }              
-              else
-                {
-                  // Now we treat the more
-                  // delicate case. If we
-                  // are here, this means
-                  // that the cell that
-                  // runs on the $j$ index
-                  // contains
-                  // support_point[i]. In
-                  // this case both the
-                  // single and the double
-                  // layer potential are
-                  // singular, and they
-                  // require special
-                  // treatment.
-                  //
-                  // Whenever the
-                  // integration is
-                  // performed with the
-                  // singularity inside the
-                  // given cell, then a
-                  // special quadrature
-                  // formula is used that
-                  // allows one to
-                  // integrate arbitrary
-                  // functions against a
-                  // singular weight on the
-                  // reference cell.
-                  // Notice that singular
-                  // integration requires a
-                  // careful selection of
-                  // the quadrature
-                  // rules. In particular
-                  // the deal.II library
-                  // provides quadrature
-                  // rules which are
-                  // taylored for
-                  // logarithmic
-                  // singularities
-                  // (QGaussLog,
-                  // QGaussLogR), as well
-                  // as for 1/R
-                  // singularities
-                  // (QGaussOneOverR).
-                  //
-                  // Singular integration
-                  // is typically obtained
-                  // by constructing
-                  // weighted quadrature
-                  // formulas with singular
-                  // weights, so that it is
-                  // possible to write
-                  //
-                  // \f[
-                  //   \int_K f(x) s(x) dx = \sum_{i=1}^N w_i f(q_i)
-                  // \f]
-                  //
-                  // where $s(x)$ is a given
-                  // singularity, and the weights
-                  // and quadrature points
-                  // $w_i,q_i$ are carefully
-                  // selected to make the formula
-                  // above an equality for a
-                  // certain class of functions
-                  // $f(x)$.
-                  //
-                  // In all the finite
-                  // element examples we
-                  // have seen so far, the
-                  // weight of the
-                  // quadrature itself
-                  // (namely, the function
-                  // $s(x)$), was always
-                  // constantly equal to 1.
-                  // For singular
-                  // integration, we have
-                  // two choices: we can
-                  // use the definition
-                  // above, factoring out
-                  // the singularity from
-                  // the integrand (i.e.,
-                  // integrating $f(x)$
-                  // with the special
-                  // quadrature rule), or
-                  // we can ask the
-                  // quadrature rule to
-                  // "normalize" the
-                  // weights $w_i$ with
-                  // $s(q_i)$:
-                  //
-                  // \f[
-                  //   \int_K f(x) s(x) dx =
-                  //   \int_K g(x) dx = \sum_{i=1}^N \frac{w_i}{s(q_i)} g(q_i)
-                  // \f]
-                  //
-                  // We use this second
-                  // option, through the @p
-                  // factor_out_singularity
-                  // parameter of both
-                  // QGaussLogR and
-                  // QGaussOneOverR.
-                  //
-                  // These integrals are
-                  // somewhat delicate,
-                  // especially in two
-                  // dimensions, due to the
-                  // transformation from
-                  // the real to the
-                  // reference cell, where
-                  // the variable of
-                  // integration is scaled
-                  // with the determinant
-                  // of the transformation.
-                  //
-                  // In two dimensions this
-                  // process does not
-                  // result only in a
-                  // factor appearing as a
-                  // constant factor on the
-                  // entire integral, but
-                  // also on an additional
-                  // integral alltogether
-                  // that needs to be
-                  // evaluated:
-                  //
-                  // \f[
-                  //  \int_0^1 f(x)\ln(x/\alpha) dx =
-                  //  \int_0^1 f(x)\ln(x) dx - \int_0^1 f(x) \ln(\alpha) dx.
-                  // \f]
-                  //
-                  // This process is taken care of by
-                  // the constructor of the QGaussLogR
-                  // class, which adds additional
-                  // quadrature points and weights to
-                  // take into consideration also the
-                  // second part of the integral.
-                  //
-                  // A similar reasoning
-                  // should be done in the
-                  // three dimensional
-                  // case, since the
-                  // singular quadrature is
-                  // taylored on the
-                  // inverse of the radius
-                  // $r$ in the reference
-                  // cell, while our
-                  // singular function
-                  // lives in real space,
-                  // however in the three
-                  // dimensional case
-                  // everything is simpler
-                  // because the
-                  // singularity scales
-                  // linearly with the
-                  // determinant of the
-                  // transformation. This
-                  // allows us to build the
-                  // singular two
-                  // dimensional quadrature
-                  // rules once and for all
-                  // outside the loop over
-                  // all cells, using only
-                  // a pointer where needed.
-                  //
-                  // Notice that in one
-                  // dimensional
-                  // integration this is
-                  // not possible, since we
-                  // need to know the
-                  // scaling parameter for
-                  // the quadrature, which
-                  // is not known a
-                  // priori. Here, the
-                  // quadrature rule itself
-                  // depends also on the
-                  // size of the current
-                  // cell. For this reason,
-                  // it is necessary to
-                  // create a new
-                  // quadrature for each
-                  // singular
-                  // integration. Since we
-                  // create it using the
-                  // new operator of C++,
-                  // we also need to
-                  // destroy it using the
-                  // dual of new:
-                  // delete. This is done
-                  // at the end, and only
-                  // if dim == 2.
-                  //
-                  // Putting all this into a
-                  // dimension independent
-                  // framework requires a little
-                  // trick. The problem is that,
-                  // depending on dimension, we'd
-                  // like to either assign a
-                  // QGaussLogR<1> or a
-                  // QGaussOneOverR<2> to a
-                  // Quadrature<dim-1>. C++
-                  // doesn't allow this right
-                  // away, and neither is a
-                  // static_cast
-                  // possible. However, we can
-                  // attempt a dynamic_cast: the
-                  // implementation will then
-                  // look up at run time whether
-                  // the conversion is possible
-                  // (which we <em>know</em> it
-                  // is) and if that isn't the
-                  // case simply return a null
-                  // pointer. To be sure we can
-                  // then add a safety check at
-                  // the end:
-                  Assert(singular_index != numbers::invalid_unsigned_int,
-                         ExcInternalError());
-
-                  const Quadrature<dim - 1> *singular_quadrature =
-                    &(get_singular_quadrature(singular_index));
-                  Assert(singular_quadrature, ExcInternalError());
-
-                  FEValues<dim - 1, dim> fe_v_singular(
-                    *mapping,
-                    *fe,
-                    *singular_quadrature,
-                    update_jacobians | update_values | update_normal_vectors |
-                      update_quadrature_points);
-
-                  fe_v_singular.reinit(cell);
-
-                  const std::vector<Tensor<1, dim>> &singular_normals =
-                    fe_v_singular.get_normal_vectors();
-                  const std::vector<Point<dim>> &singular_q_points =
-                    fe_v_singular.get_quadrature_points();
-
-                  for (unsigned int q = 0; q < singular_quadrature->size(); ++q)
-                    {
-                      const Tensor<1, dim> R =
-                        singular_q_points[q] - support_points[i];
-                      if (kernel_type == "laplace")
-                        LaplaceKernel::kernels(R, D, s);
-                      else if (kernel_type == "screened")
-                        ScreenedKernel::kernels(R, D, s, screened_kappa);
-                      else
-                        AssertThrow(false, ExcMessage("Unknown kernel type: " + kernel_type));
-
-                      for (unsigned int j = 0; j < fe->dofs_per_cell; ++j)
-                        {
-                          local_neumann_matrix_row_i(j) +=
-                            ((D * singular_normals[q]) *
-                             fe_v_singular.shape_value(j, q) *
-                             fe_v_singular.JxW(q));
-
-                          local_dirichlet_matrix_row_i(j) +=
-                            (s * fe_v_singular.shape_value(j, q) *
-                             fe_v_singular.JxW(q));
-                        }
-                    }
-                }
-
-              // Finally, we need to add
-              // the contributions of the
-              // current cell to the
-              // global matrix.
-              for (unsigned int j = 0; j < fe->dofs_per_cell; ++j)
-                {
-                  neumann_matrix.add(i,
-                                     local_dof_indices[j],
-                                     local_neumann_matrix_row_i(j));
-                  dirichlet_matrix.add(i,
-                                       local_dof_indices[j],
-                                       local_dirichlet_matrix_row_i(j));
-                }
-            }
         }
-    }
+
+        // We then perform the
+        // integral. If the index $i$
+        // is not one of the local
+        // degrees of freedom, we
+        // simply have to add the
+        // single layer terms to the
+        // right hand side, and the
+        // double layer terms to the
+        // matrix:
+        if ((is_singular == false) && (is_quasi_singular == false))
+        {
+          for (unsigned int q = 0; q < n_q_points; ++q)
+          {
+            const Tensor<1, dim> R = q_points[q] - support_points[i];
+            if (kernel_type == "laplace")
+              LaplaceKernel::kernels(R, D, s);
+            else if (kernel_type == "screened")
+              ScreenedKernel::kernels(R, D, s, screened_kappa);
+            else
+              AssertThrow(false, ExcMessage("Unknown kernel type: " + kernel_type));
+            // if(support_points[i][0]==0.25&&support_points[i][1]==0.25)
+            //   pcout<<"D "<<D<<" s "<<s<<" , ";
+            for (unsigned int j = 0; j < fe->dofs_per_cell; ++j)
+            {
+              local_neumann_matrix_row_i(j) +=
+                ((D * normals[q]) * fe_v.shape_value(j, q) *
+                  fe_v.JxW(q));
+              local_dirichlet_matrix_row_i(j) +=
+                (s * fe_v.shape_value(j, q) * fe_v.JxW(q));
+            }
+          }
+        }
+        else if(is_quasi_singular == true)
+        {
+          pcout << cell << " \t s: " << singularity << "\t \t --> the quadrature is quasi singular" << std::endl;
+          const Quadrature<dim - 1> quasi_singular_quadrature =
+              get_quasi_singular_quadrature(cell, *mapping, singularity, ref_projection);
+          Assert(quasi_singular_quadrature.size() > 0, ExcMessage("empty quasi-singular quadrature!"));
+
+          FEValues<dim - 1, dim> fe_v_quasi_singular(
+              *mapping,
+              *fe,
+              quasi_singular_quadrature,
+              update_jacobians | update_values | update_normal_vectors |
+                update_quadrature_points | update_JxW_values);
+
+          fe_v_quasi_singular.reinit(cell);
+
+          const std::vector<Tensor<1, dim>> &quasi_singular_normals =
+              fe_v_quasi_singular.get_normal_vectors();
+          const std::vector<Point<dim>> &quasi_singular_q_points =
+              fe_v_quasi_singular.get_quadrature_points();
+
+          for (unsigned int q = 0; q < quasi_singular_quadrature.size(); ++q)
+          {
+            const Tensor<1, dim> R = quasi_singular_q_points[q] - support_points[i];
+            if (kernel_type == "laplace")
+              LaplaceKernel::kernels(R, D, s);
+            else if (kernel_type == "screened")
+              ScreenedKernel::kernels(R, D, s, screened_kappa);
+            else
+              AssertThrow(false, ExcMessage("Unknown kernel type: " + kernel_type));
+
+            for (unsigned int j = 0; j < fe->dofs_per_cell; ++j)
+            {
+              local_neumann_matrix_row_i(j) +=
+                ((D * quasi_singular_normals[q]) *
+                 fe_v_quasi_singular.shape_value(j, q) *
+                 fe_v_quasi_singular.JxW(q));
+
+              local_dirichlet_matrix_row_i(j) +=
+                (s * fe_v_quasi_singular.shape_value(j, q) *
+                 fe_v_quasi_singular.JxW(q));
+            }
+          }
+        }              
+        else
+        {
+          // Now we treat the more
+          // delicate case. If we
+          // are here, this means
+          // that the cell that
+          // runs on the $j$ index
+          // contains
+          // support_point[i]. In
+          // this case both the
+          // single and the double
+          // layer potential are
+          // singular, and they
+          // require special
+          // treatment.
+          //
+          // Whenever the
+          // integration is
+          // performed with the
+          // singularity inside the
+          // given cell, then a
+          // special quadrature
+          // formula is used that
+          // allows one to
+          // integrate arbitrary
+          // functions against a
+          // singular weight on the
+          // reference cell.
+          // Notice that singular
+          // integration requires a
+          // careful selection of
+          // the quadrature
+          // rules. In particular
+          // the deal.II library
+          // provides quadrature
+          // rules which are
+          // taylored for
+          // logarithmic
+          // singularities
+          // (QGaussLog,
+          // QGaussLogR), as well
+          // as for 1/R
+          // singularities
+          // (QGaussOneOverR).
+          //
+          // Singular integration
+          // is typically obtained
+          // by constructing
+          // weighted quadrature
+          // formulas with singular
+          // weights, so that it is
+          // possible to write
+          //
+          // \f[
+          //   \int_K f(x) s(x) dx = \sum_{i=1}^N w_i f(q_i)
+          // \f]
+          //
+          // where $s(x)$ is a given
+          // singularity, and the weights
+          // and quadrature points
+          // $w_i,q_i$ are carefully
+          // selected to make the formula
+          // above an equality for a
+          // certain class of functions
+          // $f(x)$.
+          //
+          // In all the finite
+          // element examples we
+          // have seen so far, the
+          // weight of the
+          // quadrature itself
+          // (namely, the function
+          // $s(x)$), was always
+          // constantly equal to 1.
+          // For singular
+          // integration, we have
+          // two choices: we can
+          // use the definition
+          // above, factoring out
+          // the singularity from
+          // the integrand (i.e.,
+          // integrating $f(x)$
+          // with the special
+          // quadrature rule), or
+          // we can ask the
+          // quadrature rule to
+          // "normalize" the
+          // weights $w_i$ with
+          // $s(q_i)$:
+          //
+          // \f[
+          //   \int_K f(x) s(x) dx =
+          //   \int_K g(x) dx = \sum_{i=1}^N \frac{w_i}{s(q_i)} g(q_i)
+          // \f]
+          //
+          // We use this second
+          // option, through the @p
+          // factor_out_singularity
+          // parameter of both
+          // QGaussLogR and
+          // QGaussOneOverR.
+          //
+          // These integrals are
+          // somewhat delicate,
+          // especially in two
+          // dimensions, due to the
+          // transformation from
+          // the real to the
+          // reference cell, where
+          // the variable of
+          // integration is scaled
+          // with the determinant
+          // of the transformation.
+          //
+          // In two dimensions this
+          // process does not
+          // result only in a
+          // factor appearing as a
+          // constant factor on the
+          // entire integral, but
+          // also on an additional
+          // integral alltogether
+          // that needs to be
+          // evaluated:
+          //
+          // \f[
+          //  \int_0^1 f(x)\ln(x/\alpha) dx =
+          //  \int_0^1 f(x)\ln(x) dx - \int_0^1 f(x) \ln(\alpha) dx.
+          // \f]
+          //
+          // This process is taken care of by
+          // the constructor of the QGaussLogR
+          // class, which adds additional
+          // quadrature points and weights to
+          // take into consideration also the
+          // second part of the integral.
+          //
+          // A similar reasoning
+          // should be done in the
+          // three dimensional
+          // case, since the
+          // singular quadrature is
+          // taylored on the
+          // inverse of the radius
+          // $r$ in the reference
+          // cell, while our
+          // singular function
+          // lives in real space,
+          // however in the three
+          // dimensional case
+          // everything is simpler
+          // because the
+          // singularity scales
+          // linearly with the
+          // determinant of the
+          // transformation. This
+          // allows us to build the
+          // singular two
+          // dimensional quadrature
+          // rules once and for all
+          // outside the loop over
+          // all cells, using only
+          // a pointer where needed.
+          //
+          // Notice that in one
+          // dimensional
+          // integration this is
+          // not possible, since we
+          // need to know the
+          // scaling parameter for
+          // the quadrature, which
+          // is not known a
+          // priori. Here, the
+          // quadrature rule itself
+          // depends also on the
+          // size of the current
+          // cell. For this reason,
+          // it is necessary to
+          // create a new
+          // quadrature for each
+          // singular
+          // integration. Since we
+          // create it using the
+          // new operator of C++,
+          // we also need to
+          // destroy it using the
+          // dual of new:
+          // delete. This is done
+          // at the end, and only
+          // if dim == 2.
+          //
+          // Putting all this into a
+          // dimension independent
+          // framework requires a little
+          // trick. The problem is that,
+          // depending on dimension, we'd
+          // like to either assign a
+          // QGaussLogR<1> or a
+          // QGaussOneOverR<2> to a
+          // Quadrature<dim-1>. C++
+          // doesn't allow this right
+          // away, and neither is a
+          // static_cast
+          // possible. However, we can
+          // attempt a dynamic_cast: the
+          // implementation will then
+          // look up at run time whether
+          // the conversion is possible
+          // (which we <em>know</em> it
+          // is) and if that isn't the
+          // case simply return a null
+          // pointer. To be sure we can
+          // then add a safety check at
+          // the end:
+          Assert(singular_index != numbers::invalid_unsigned_int,
+                 ExcInternalError());
+
+          const Quadrature<dim - 1> *singular_quadrature =
+            &(get_singular_quadrature(singular_index));
+          Assert(singular_quadrature, ExcInternalError());
+
+          FEValues<dim - 1, dim> fe_v_singular(
+            *mapping,
+            *fe,
+            *singular_quadrature,
+            update_jacobians | update_values | update_normal_vectors |
+              update_quadrature_points);
+
+          fe_v_singular.reinit(cell);
+
+          const std::vector<Tensor<1, dim>> &singular_normals =
+            fe_v_singular.get_normal_vectors();
+          const std::vector<Point<dim>> &singular_q_points =
+            fe_v_singular.get_quadrature_points();
+
+          for (unsigned int q = 0; q < singular_quadrature->size(); ++q)
+          {
+            const Tensor<1, dim> R =
+              singular_q_points[q] - support_points[i];
+            if (kernel_type == "laplace")
+              LaplaceKernel::kernels(R, D, s);
+            else if (kernel_type == "screened")
+              ScreenedKernel::kernels(R, D, s, screened_kappa);
+            else
+              AssertThrow(false, ExcMessage("Unknown kernel type: " + kernel_type));
+
+            for (unsigned int j = 0; j < fe->dofs_per_cell; ++j)
+            {
+              local_neumann_matrix_row_i(j) +=
+                ((D * singular_normals[q]) *
+                 fe_v_singular.shape_value(j, q) *
+                 fe_v_singular.JxW(q));
+
+              local_dirichlet_matrix_row_i(j) +=
+                (s * fe_v_singular.shape_value(j, q) *
+                 fe_v_singular.JxW(q));
+            }
+          }
+        }// end else
+
+        // Finally, we need to add
+        // the contributions of the
+        // current cell to the
+        // global matrix.
+        for (unsigned int j = 0; j < fe->dofs_per_cell; ++j)
+        {
+          neumann_matrix.add(i,
+                             local_dof_indices[j],
+                             local_neumann_matrix_row_i(j));
+          dirichlet_matrix.add(i,
+                               local_dof_indices[j],
+                               local_dirichlet_matrix_row_i(j));
+        }
+      } // end if (this_cpu_set.is_element(i))
+    } // end loop on dofs
+  } // end loop on cells
 
   // The second part of the integral
   // operator is the term
@@ -2966,25 +2970,44 @@ BEMProblem<dim>::compute_gradients_hypersingular(
       // therefore check wether this is
       // the case, and we store which
       // one is the singular index:
-      for (types::global_dof_index i = 0; i < dh.n_dofs();
-           ++i) // these must now be the locally owned dofs. the rest should
-                // stay the same
+      for (types::global_dof_index i = 0; i < dh.n_dofs(); ++i) // these must now be the locally owned dofs. the rest should stay the same
         {
           Tensor<1, dim> integral;
           Tensor<1, dim> b_integral;
           if (this_cpu_set.is_element(i))
             {
+              Point<dim> singularity = support_points[i];
+              Point<dim-1> ref_projection(0.0,0.0);
               bool         is_singular    = false;
               unsigned int singular_index = numbers::invalid_unsigned_int;
 
               for (unsigned int j = 0; j < fe->dofs_per_cell; ++j)
                 // if(local_dof_indices[j] == i)
                 if (double_nodes_set[i].count(local_dof_indices[j]) > 0)
-                  {
-                    singular_index = j;
-                    is_singular    = true;
-                    break;
-                  }
+                {
+                  singular_index = j;
+                  is_singular    = true;
+                  break;
+                }
+                
+              bool is_quasi_singular = false;
+              if (is_singular == false)
+              {
+                Point<dim> singularity = support_points[i];
+                double dist_to_center = (singularity - cell->center()).norm();
+                double h = cell->diameter();
+                if(dist_to_center - 0.5*h < 0.001)
+                {
+                  QuasiSingularKernelIntegral<dim> qski(cell, *fe, *mapping, singularity);
+                  ref_projection = qski.get_closest_reference_point();
+                  double dist_to_cell = qski.min_distance;
+                  
+                  double distance_ratio = dist_to_cell / cell->diameter();
+                  if(distance_ratio < 10)
+                    is_quasi_singular = true;
+                }
+
+              }
 
               // We then perform the
               // integral. If the index $i$
@@ -2996,29 +3019,72 @@ BEMProblem<dim>::compute_gradients_hypersingular(
               // double layer terms to the
               // matrix:
 
-              if (is_singular == false)
+              if ((is_singular == false) && (is_quasi_singular == false))
+              {
+                for (unsigned int q = 0; q < n_q_points; ++q)
                 {
-                  for (unsigned int q = 0; q < n_q_points; ++q)
-                    {
-                      const Tensor<1, dim> R = q_points[q] - support_points[i];
-                      if (kernel_type == "laplace")
-                        LaplaceKernel::kernels(R, H, D, s);
-                      else if (kernel_type == "screened")
-                        ScreenedKernel::kernels(R, H, D, s, screened_kappa);
-                      else
-                        AssertThrow(false, ExcMessage("Unknown kernel type: " + kernel_type));
-                      for (unsigned int j = 0; j < fe->dofs_per_cell; ++j)
-                        {
-                          integral += -phi_local(local_dof_indices[j]) *
-                                        (H * normals[q]) *
-                                        fe_v.shape_value(j, q) * fe_v.JxW(q) +
-                                      dphi_dn_local(local_dof_indices[j]) * D *
-                                        fe_v.shape_value(j, q) * fe_v.JxW(q);
-                          b_integral += -1.0 * (H * normals[q]) *
-                                        fe_v.shape_value(j, q) * fe_v.JxW(q);
-                        }
-                    }
+                  const Tensor<1, dim> R = q_points[q] - support_points[i];
+                  if (kernel_type == "laplace")
+                    LaplaceKernel::kernels(R, H, D, s);
+                  else if (kernel_type == "screened")
+                    ScreenedKernel::kernels(R, H, D, s, screened_kappa);
+                  else
+                    AssertThrow(false, ExcMessage("Unknown kernel type: " + kernel_type));
+                  for (unsigned int j = 0; j < fe->dofs_per_cell; ++j)
+                  {
+                    integral += -phi_local(local_dof_indices[j]) *
+                                  (H * normals[q]) *
+                                  fe_v.shape_value(j, q) * fe_v.JxW(q) +
+                                dphi_dn_local(local_dof_indices[j]) * D *
+                                  fe_v.shape_value(j, q) * fe_v.JxW(q);
+                    b_integral += -1.0 * (H * normals[q]) *
+                                  fe_v.shape_value(j, q) * fe_v.JxW(q);
+                  }
                 }
+              }
+              else if(is_quasi_singular == true)
+              {
+                //pcout << cell << " \t s: " << singularity << "\t \t --> the quadrature is quasi singular" << std::endl;
+                const Quadrature<dim - 1> quasi_singular_quadrature =
+                    get_quasi_singular_quadrature(cell, *mapping, singularity, ref_projection);
+        //                Assert(quasi_singular_quadrature, ExcInternalError());
+
+                FEValues<dim - 1, dim> fe_v_quasi_singular(
+                    *mapping,
+                    *fe,
+                    quasi_singular_quadrature,
+                    update_jacobians | update_values | update_normal_vectors |
+                      update_quadrature_points | update_JxW_values);
+
+                fe_v_quasi_singular.reinit(cell);
+
+                const std::vector<Tensor<1, dim>> &quasi_singular_normals =
+                    fe_v_quasi_singular.get_normal_vectors();
+                const std::vector<Point<dim>> &quasi_singular_q_points =
+                    fe_v_quasi_singular.get_quadrature_points();
+
+                for (unsigned int q = 0; q < quasi_singular_quadrature.size(); ++q)
+                {
+                  const Tensor<1, dim> R = quasi_singular_q_points[q] - support_points[i];
+                  if (kernel_type == "laplace")
+                    LaplaceKernel::kernels(R, H, D, s);
+                  else if (kernel_type == "screened")
+                    ScreenedKernel::kernels(R, H, D, s, screened_kappa);
+                  else
+                    AssertThrow(false, ExcMessage("Unknown kernel type: " + kernel_type));
+
+                  for (unsigned int j = 0; j < fe->dofs_per_cell; ++j)
+                  {
+                    integral += -phi_local(local_dof_indices[j]) *
+                                  (H * quasi_singular_normals[q]) *
+                                  fe_v_quasi_singular.shape_value(j, q) * fe_v_quasi_singular.JxW(q) +
+                                dphi_dn_local(local_dof_indices[j]) * D *
+                                  fe_v_quasi_singular.shape_value(j, q) * fe_v_quasi_singular.JxW(q);
+                    b_integral += -1.0 * (H * quasi_singular_normals[q]) *
+                                  fe_v_quasi_singular.shape_value(j, q) * fe_v_quasi_singular.JxW(q);
+                  }
+                }
+              }       
               else
                 {
                   // Now we treat the more
