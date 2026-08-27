@@ -464,15 +464,16 @@ const Quadrature<2>
 BEMProblem<3>::get_quasi_singular_quadrature(const typename DoFHandler<2,3>::active_cell_iterator &cell,
                                               const Mapping<2,3> &mapping,
                                               const Point<3> &singularity,
-                                              const Point<2> &ref_projection) const
+                                              const Point<2> &ref_projection,
+                                              const double exponent) const
 {
   return telles_quadrature(
         cell,
         mapping,
         singularity,
         ref_projection,
-        quadrature_order,
-        2);
+        quasi_singular_quadrature_order,
+        exponent);
 }
 
 template <>
@@ -480,15 +481,16 @@ const Quadrature<1>
 BEMProblem<2>::get_quasi_singular_quadrature(const typename DoFHandler<1,2>::active_cell_iterator &cell,
                                               const Mapping<1,2> &mapping,
                                               const Point<2> &singularity,
-                                              const Point<1> &ref_projection) const
+                                              const Point<1> &ref_projection,
+                                              const double exponent) const
 {
   return telles_quadrature(
         cell,
         mapping,
         singularity,
         ref_projection,
-        quadrature_order,
-        2);
+        quasi_singular_quadrature_order,
+        exponent);
 }
 
 template <int dim>
@@ -523,6 +525,7 @@ BEMProblem<dim>::declare_parameters(ParameterHandler &prm)
                         QuadratureSelector<(dim - 1)>::get_quadrature_names()));
     prm.declare_entry("Quadrature order", "4", Patterns::Integer());
     prm.declare_entry("Singular quadrature order", "5", Patterns::Integer());
+    prm.declare_entry("Quasi singular quadrature order", "5", Patterns::Integer());
   }
   prm.leave_subsection();
 
@@ -583,6 +586,7 @@ BEMProblem<dim>::parse_parameters(ParameterHandler &prm)
                                       prm.get_integer("Quadrature order")));
     quadrature_order          = prm.get_integer("Quadrature order");
     singular_quadrature_order = prm.get_integer("Singular quadrature order");
+    quasi_singular_quadrature_order = prm.get_integer("Quasi singular quadrature order");
   }
   prm.leave_subsection();
 
@@ -970,28 +974,29 @@ BEMProblem<dim>::assemble_system()
         }
         else if(is_quasi_singular == true)
         {
-          pcout << cell << " \t s: " << singularity << "\t \t --> the quadrature is quasi singular" << std::endl;
-          const Quadrature<dim - 1> quasi_singular_quadrature =
-              get_quasi_singular_quadrature(cell, *mapping, singularity, ref_projection);
-          Assert(quasi_singular_quadrature.size() > 0, ExcMessage("empty quasi-singular quadrature!"));
+          // pcout << cell << " \t s: " << singularity << "\t \t --> the quadrature is quasi singular" << std::endl;
+          // for newmann matrix
+          const Quadrature<dim - 1> quasi_singular_quadrature_neumann =
+              get_quasi_singular_quadrature(cell, *mapping, singularity, ref_projection, 2);
+          Assert(quasi_singular_quadrature_neumann.size() > 0, ExcMessage("empty quasi-singular quadrature!"));
 
-          FEValues<dim - 1, dim> fe_v_quasi_singular(
+          FEValues<dim - 1, dim> fe_v_neumann(
               *mapping,
               *fe,
-              quasi_singular_quadrature,
+              quasi_singular_quadrature_neumann,
               update_jacobians | update_values | update_normal_vectors |
                 update_quadrature_points | update_JxW_values);
 
-          fe_v_quasi_singular.reinit(cell);
+          fe_v_neumann.reinit(cell);
 
-          const std::vector<Tensor<1, dim>> &quasi_singular_normals =
-              fe_v_quasi_singular.get_normal_vectors();
-          const std::vector<Point<dim>> &quasi_singular_q_points =
-              fe_v_quasi_singular.get_quadrature_points();
-
-          for (unsigned int q = 0; q < quasi_singular_quadrature.size(); ++q)
+          const std::vector<Tensor<1, dim>> &neumann_normals =
+              fe_v_neumann.get_normal_vectors();
+          const std::vector<Point<dim>> &neumann_q_points =
+              fe_v_neumann.get_quadrature_points();
+          
+          for (unsigned int q = 0; q < quasi_singular_quadrature_neumann.size(); ++q)
           {
-            const Tensor<1, dim> R = quasi_singular_q_points[q] - support_points[i];
+            const Tensor<1, dim> R = neumann_q_points[q] - support_points[i];
             if (kernel_type == "laplace")
               LaplaceKernel::kernels(R, D, s);
             else if (kernel_type == "screened")
@@ -1002,13 +1007,46 @@ BEMProblem<dim>::assemble_system()
             for (unsigned int j = 0; j < fe->dofs_per_cell; ++j)
             {
               local_neumann_matrix_row_i(j) +=
-                ((D * quasi_singular_normals[q]) *
-                 fe_v_quasi_singular.shape_value(j, q) *
-                 fe_v_quasi_singular.JxW(q));
+                ((D * neumann_normals[q]) *
+                 fe_v_neumann.shape_value(j, q) *
+                 fe_v_neumann.JxW(q));
+            }
+          }
+          
+          
+          // for dirichlet matrix    
+          const Quadrature<dim - 1> quasi_singular_quadrature_dirichlet =
+              get_quasi_singular_quadrature(cell, *mapping, singularity, ref_projection, 1);
+          Assert(quasi_singular_quadrature_dirichlet.size() > 0, ExcMessage("empty quasi-singular quadrature!"));
 
+          FEValues<dim - 1, dim> fe_v_dirichlet(
+              *mapping,
+              *fe,
+              quasi_singular_quadrature_dirichlet,
+              update_jacobians | update_values | update_normal_vectors |
+                update_quadrature_points | update_JxW_values);
+
+          fe_v_dirichlet.reinit(cell);
+
+          //const std::vector<Tensor<1, dim>> &dirichlet_normals = fe_v_dirichlet.get_normal_vectors();
+          const std::vector<Point<dim>> &dirichlet_q_points =
+              fe_v_dirichlet.get_quadrature_points();
+    
+          for (unsigned int q = 0; q < quasi_singular_quadrature_dirichlet.size(); ++q)
+          {
+            const Tensor<1, dim> R = dirichlet_q_points[q] - support_points[i];
+            if (kernel_type == "laplace")
+              LaplaceKernel::kernels(R, D, s);
+            else if (kernel_type == "screened")
+              ScreenedKernel::kernels(R, D, s, screened_kappa);
+            else
+              AssertThrow(false, ExcMessage("Unknown kernel type: " + kernel_type));
+
+            for (unsigned int j = 0; j < fe->dofs_per_cell; ++j)
+            {
               local_dirichlet_matrix_row_i(j) +=
-                (s * fe_v_quasi_singular.shape_value(j, q) *
-                 fe_v_quasi_singular.JxW(q));
+                (s * fe_v_dirichlet.shape_value(j, q) *
+                 fe_v_dirichlet.JxW(q));
             }
           }
         }              
@@ -1400,6 +1438,28 @@ BEMProblem<dim>::compute_hypersingular_free_coeffs()
   DoFTools::map_dofs_to_support_points<dim - 1, dim>(*mapping,
                                                      dh,
                                                      support_points);
+                                                         
+  // check which are the global dofs with on the sphere (material id 1)
+  std::vector<bool> dof_in_material_1(dh.n_dofs(), false);
+  if( comp_dom.input_grid_name == "../grids/sphere_box_flipped" ||
+              comp_dom.input_grid_name == "../grids/sphere_box_flipped_double_nodes" ||
+              comp_dom.input_grid_name == "../grids/sphere_box_flipped_new")
+  {
+    for (auto cell = dh.begin_active(); cell != dh.end(); ++cell)
+    {
+      if (int(cell->material_id()) == 1)
+      {
+        cell->get_dof_indices(local_dof_indices);
+
+        for (const auto dof : local_dof_indices)
+        {
+            dof_in_material_1[dof] = true;
+        }
+      }
+    }
+  }
+  
+                                               
 
   for (types::global_dof_index i = 0; i < dh.n_dofs();
        ++i) // these must now be the locally owned dofs. the rest should stay
@@ -1551,16 +1611,26 @@ BEMProblem<dim>::compute_hypersingular_free_coeffs()
               geom_alpha -=
                 acos(unique_ordered_normals[unique_ordered_normals.size() - 1] *
                      unique_ordered_normals[0]);
-            }
+            } 
           
           // then geom_alpha is normalized to get a value between 0 and 1    
           geom_alpha /= 4 * numbers::PI;
+          
+          // for concave doimains we need the external angle
+          if( comp_dom.input_grid_name == "../grids/sphere_box_flipped" ||
+              comp_dom.input_grid_name == "../grids/sphere_box_flipped_double_nodes" ||
+              comp_dom.input_grid_name == "../grids/sphere_box_flipped_new")
+          {
+              if(dof_in_material_1[i])
+                geom_alpha = 1 - geom_alpha;
+          }
+          
           hyp_alpha(i) = geom_alpha;
 
           // just in case we need to check the code
-          const Point<dim> refinement_center(0, 0, -1);
-          const double distance_from_center = refinement_center.distance(support_points[i]);
-          if (true)//(distance_from_center < 0.1)
+          //const Point<dim> refinement_center(0, 0, -1);
+          //const double distance_from_center = refinement_center.distance(support_points[i]);         
+          if (std::abs(geom_alpha - alpha(i)) > 0.0003)//(true) //(distance_from_center < 0.1)
             pcout<<i << " \t" << support_points[i] <<"->\t geom_alpha: "<<geom_alpha<<" \t alpha(i): "<<alpha(i)<<endl; 
           // if (fabs(geom_alpha-alpha(i)) > 1e-3)
           //   pcout<<"HELP! 	fabs(geom_alpha-alpha(i)) > 1e-3"<<endl;
@@ -1601,10 +1671,13 @@ BEMProblem<dim>::compute_hypersingular_free_coeffs()
     }
 
   pcout << "Done computing C_ij tensor" << endl;
+  
   TrilinosWrappers::MPI::Vector error(hyp_alpha);
   error.sadd(-1.0, alpha);
+      
   pcout << "Alpha abs error: " << error.l2_norm() << endl;
   pcout << "Alpha rel error: " << error.l2_norm() / alpha.l2_norm() << endl;
+  pcout << "Alpha maximum error: " << error.linfty_norm() << endl;
 
   // Calculating second free term as in Mantic et al. paper
   // Existence and evaluation of the two free terms in the hypersingular
@@ -1719,6 +1792,31 @@ template <int dim>
 void
 BEMProblem<dim>::compute_alpha(const double kappa)
 {
+  // normalizers to the size of the mesh
+  // Bounding box del dominio
+  BoundingBox<dim> bbox = GridTools::compute_bounding_box(comp_dom.tria);
+  auto [p_min, p_max] = bbox.get_boundary_points(); // Point<dim>, Point<dim>
+
+  // Diametro della mesh (distanza massima tra due vertici)
+  //double diam = GridTools::diameter(comp_dom.tria);  
+
+  Point<dim> centroid;
+  double     extent[dim];
+  for (unsigned int d = 0; d < dim; ++d)
+  {
+    centroid(d) = 0.5 * (p_min(d) + p_max(d));
+    extent[d]   = p_max(d) - p_min(d);
+  }
+
+  // pesi a_d bilanciati sull'estensione del dominio
+  double sum_inv_sq = 0.0;
+  for (unsigned int d = 0; d < dim; ++d)
+    sum_inv_sq += 1.0 / (extent[d] * extent[d]);
+
+  double a[dim];
+  for (unsigned int d = 0; d < dim; ++d)
+    a[d] =  kappa / std::sqrt(sum_inv_sq);// kappa / (extent[d] * std::sqrt(sum_inv_sq)); //2*kappa / (diam * sqrt(dim)); //kappa / std::sqrt(dim);  
+
   // original section, used in the last part
   static TrilinosWrappers::MPI::Vector ones, zeros, dum;
   if (ones.size() != dh.n_dofs())
@@ -1767,13 +1865,6 @@ BEMProblem<dim>::compute_alpha(const double kappa)
                                 update_values | update_normal_vectors |
                                   update_quadrature_points | update_JxW_values);
 
-    // Define constant vector with components kappa/sqrt(3)
-	  // todo: invee che 3 ci metto dim?
-    const double inv_sqrt3 = 1.0 / std::sqrt(3.0);
-    Tensor<1,dim> kappa_vector;
-    for (unsigned int cc = 0; cc < dim; ++cc)
-  	  kappa_vector[cc] = kappa * inv_sqrt3;
-
     // Loop over cells
     for (cell = dh.begin_active(); cell != endc; ++cell)
     {
@@ -1784,27 +1875,26 @@ BEMProblem<dim>::compute_alpha(const double kappa)
       
       // Loop over DoF indices on this cell
       for (unsigned int j = 0; j < fe->dofs_per_cell; ++j)             
-      {              
-        // print dof coordinates
-        // std::cout << "i:  " << local_dof_indices[j] << "  sp:  " << support_points[local_dof_indices[j]] << endl;
-
+      {         
         // skip hanging nodes
         if (c_hn.is_constrained(local_dof_indices[j]))
           continue;
+          
+        const Point<dim> &punto = support_points[local_dof_indices[j]];
+
+        double xp[dim], ch[dim], sh[dim];
+        for (unsigned int d = 0; d < dim; ++d)
+        {
+          xp[d] = punto[d] - centroid(d);
+          ch[d] = std::cosh(a[d] * xp[d]);
+          sh[d] = std::sinh(a[d] * xp[d]);
+        }  
               
-        // Normal vector (local_normal) and its norm (normy), initialized to zero
+        // Normal vector (local_normal) initialized to zero
         Tensor<1,dim> local_normal;
         for (unsigned int ii = 0; ii < dim; ++ii)
-	        local_normal[ii] = 0;
-        double normy = 0;	        
-              
-        // Sum of coordinates (x+y+z)
-        double sum = 0.0;
-              
-        // Take the reference to support_point to sum the components
-        const Point<dim> &punto = support_points[local_dof_indices[j]];
-               
-        // Loop over components of the current Dof
+	        local_normal[ii] = 0;        
+	        
         for (unsigned int d = 0; d < dim; ++d)
         {
           // Map indices between subdivided and original systems (to obtain vec_index)
@@ -1821,28 +1911,34 @@ BEMProblem<dim>::compute_alpha(const double kappa)
             vector_this_cpu_set.is_element(vec_index),
             ExcMessage(
               "vector cpu set and cpu set are inconsistent"));
-                  
-          // Sum the components of the DoF (x+y+z)
-          sum += punto[d];    
           
           // Build local_normal component by component  
-          normy += vector_normals_solution[vec_index] *
-                         vector_normals_solution[vec_index];
-          local_normal[d] = vector_normals_solution[vec_index];
+          local_normal[d] = vector_normals_solution[vec_index]; 
         }
-              
-        // normalize the normal vector (just to be sure)
-        // local_normal = local_normal; / std::sqrt(normy);
         
-        // Function value: exp(-kappa/sqrt(3) * (x+y+z))
-        function_coeff(local_dof_indices[j]) = std::exp(- kappa * inv_sqrt3 * sum);
-        
-        // Normal derivative: -function * kappa_vector * normal vector
-        normal_derivative_coeff(local_dof_indices[j]) = kappa_vector * local_normal;
-        normal_derivative_coeff(local_dof_indices[j]) *= -function_coeff(local_dof_indices[j]);
-        
-        // print normal to the dof
-        // std::cout << "	normal:  " << local_normal << endl; 
+        // Function value: cosh(a1 x) * cosh(a2 y) * cosh(a3 z)
+        double u_val = 1.0;
+        for (unsigned int d = 0; d < dim; ++d)
+          u_val *= ch[d];
+        function_coeff(local_dof_indices[j]) = u_val;
+
+        // gradient of the ch * ch * ch function
+        double grad_u[dim];
+        for (unsigned int d = 0; d < dim; ++d)
+        {
+          double g = a[d] * sh[d];
+          for (unsigned int k = 0; k < dim; ++k)
+            if (k != d)
+              g *= ch[k];
+          grad_u[d] = g;
+        }
+
+        // normal derivative value
+        double dudn = 0;
+        for (unsigned int d = 0; d < dim; ++d)
+          dudn += grad_u[d] * local_normal[d];
+        normal_derivative_coeff(local_dof_indices[j]) = dudn;
+       
       }  
     }
   }
@@ -1862,7 +1958,7 @@ BEMProblem<dim>::compute_alpha(const double kappa)
     for (unsigned int ii = 0; ii < alpha.size(); ++ii)
     { 
       if (this_cpu_set.is_element(ii))
-      	alpha[ii] /= function_coeff[ii];
+        alpha[ii] /= function_coeff[ii];
     }
       
   }
@@ -3052,8 +3148,8 @@ BEMProblem<dim>::compute_gradients_hypersingular(
               {
                 //pcout << cell << " \t s: " << singularity << "\t \t --> the quadrature is quasi singular" << std::endl;
                 const Quadrature<dim - 1> quasi_singular_quadrature =
-                    get_quasi_singular_quadrature(cell, *mapping, singularity, ref_projection);
-        //                Assert(quasi_singular_quadrature, ExcInternalError());
+                    get_quasi_singular_quadrature(cell, *mapping, singularity, ref_projection, 2);
+                Assert(quasi_singular_quadrature.size() > 0, ExcMessage("empty quasi-singular quadrature!"));
 
                 FEValues<dim - 1, dim> fe_v_quasi_singular(
                     *mapping,

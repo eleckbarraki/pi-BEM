@@ -147,7 +147,8 @@ public:
   get_quasi_singular_quadrature(const typename DoFHandler<dim-1,dim>::active_cell_iterator &cell,
                                 const Mapping<dim-1,dim> &mapping,
                                 const Point<dim> &singularity,
-                                const Point<dim-1> &ref_projection) const;
+                                const Point<dim-1> &ref_projection,
+                                const double exponent) const;
 
   /// This function compute a very specific case, a double node that has a
   /// dirichlet-dirichlet condition. In this case there is a constraint for
@@ -352,6 +353,7 @@ public:
   /// and singular kernel quadrature to be
   /// used
   unsigned int singular_quadrature_order;
+  unsigned int quasi_singular_quadrature_order;
 
 
   TrilinosWrappers::SparsityPattern full_sparsity_pattern;

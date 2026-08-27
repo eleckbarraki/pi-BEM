@@ -913,11 +913,11 @@ ComputationalDomain<dim>::refine_and_resize(const unsigned int refinement_level)
     //////////  
     // if you want to refine around a point
     // first do one pass of global refinement
-    tria.refine_global(1);
+    //tria.refine_global(1);
     
     // refine only bottom face of the box around (0,0,-1.003)
     const Point<dim> refinement_center(0, 0, -1);
-    for (unsigned int step = 0; step < 4; ++step)
+    for (unsigned int step = 0; step < (refinement_level > 0 ? 4 : 0); ++step)
     {
       Triangulation<2, 3>::active_cell_iterator cell = tria.begin_active();
       Triangulation<2, 3>::active_cell_iterator endc = tria.end();
@@ -964,7 +964,7 @@ ComputationalDomain<dim>::refine_and_resize(const unsigned int refinement_level)
     tria.refine_global(refinement_level);
   }
   
-  // else just do the global refinement  
+  //else just do the global refinement  
   //tria.refine_global(refinement_level);
   
   pcout << "We have a tria of " << tria.n_active_cells() << " cells."
