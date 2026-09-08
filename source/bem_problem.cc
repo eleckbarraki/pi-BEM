@@ -352,7 +352,7 @@ BEMProblem<dim>::reinit()
       dirichlet_matrix.reinit(full_sparsity_pattern);
     }
   pcout << "re-initialized sparsity patterns and matrices" << std::endl;
-  preconditioner_band = 100;
+  preconditioner_band = 5000;
   preconditioner_sparsity_pattern.reinit(this_cpu_set,
                                          mpi_communicator,
                                          (types::global_dof_index)
@@ -1621,8 +1621,11 @@ BEMProblem<dim>::compute_hypersingular_free_coeffs()
               comp_dom.input_grid_name == "../grids/sphere_box_flipped_double_nodes" ||
               comp_dom.input_grid_name == "../grids/sphere_box_flipped_new")
           {
-              if(dof_in_material_1[i])
-                geom_alpha = 1 - geom_alpha;
+            if(dof_in_material_1[i])
+            {
+              geom_alpha = 1 - geom_alpha;
+              //std::cout << "alpha for concave domains "<< std::endl;
+            }
           }
           
           hyp_alpha(i) = geom_alpha;
@@ -2124,8 +2127,10 @@ BEMProblem<dim>::solve_system(TrilinosWrappers::MPI::Vector       &phi,
 
   compute_rhs(system_rhs, tmp_rhs);
 
-
   compute_constraints(constr_cpu_set, constraints, tmp_rhs);
+  
+  save_bem_data();
+  
   ConstrainedOperator<TrilinosWrappers::MPI::Vector, BEMProblem<dim>> cc(
     *this, constraints, constr_cpu_set, mpi_communicator);
 
@@ -3503,6 +3508,128 @@ BEMProblem<dim>::adaptive_refinement(
   comp_dom.tria.execute_coarsening_and_refinement();
 }
 
+
+template <int dim>
+void
+BEMProblem<dim>::save_bem_data() const
+{
+  std::ofstream neumann_file("neumann_matrix.dat");
+  std::ofstream dirichlet_file("dirichlet_matrix.dat");
+  std::ofstream alpha_file("alpha.dat");
+  std::ofstream dirichlet_nodes_file("dirichlet_nodes.dat");
+  std::ofstream neumann_nodes_file("neumann_nodes.dat");
+  std::ofstream constraints_file("constraints.dat");
+
+  neumann_file << std::setprecision(16);
+  dirichlet_file << std::setprecision(16);
+  alpha_file << std::setprecision(16);
+  dirichlet_nodes_file << std::setprecision(16);
+  neumann_nodes_file << std::setprecision(16);
+  constraints_file << std::setprecision(16);
+
+
+  // ------------------------------------------------------------
+  // Neumann matrix
+  // ------------------------------------------------------------
+
+  for (auto i : this_cpu_set)
+    {
+      for (auto entry = neumann_matrix.begin(i);
+           entry != neumann_matrix.end(i);
+           ++entry)
+        {
+          neumann_file << i << " "
+                       << entry->column() << " "
+                       << entry->value() << "\n";
+        }
+    }
+
+
+  // ------------------------------------------------------------
+  // Dirichlet matrix
+  // ------------------------------------------------------------
+
+  for (auto i : this_cpu_set)
+    {
+      for (auto entry = dirichlet_matrix.begin(i);
+           entry != dirichlet_matrix.end(i);
+           ++entry)
+        {
+          dirichlet_file << i << " "
+                         << entry->column() << " "
+                         << entry->value() << "\n";
+        }
+    }
+
+
+  // ------------------------------------------------------------
+  // Alpha
+  // ------------------------------------------------------------
+
+  for (auto i : this_cpu_set)
+    {
+      alpha_file << i << " "
+                 << alpha(i) << "\n";
+    }
+
+
+  // ------------------------------------------------------------
+  // Dirichlet nodes
+  // ------------------------------------------------------------
+
+  for (auto i : this_cpu_set)
+    {
+      dirichlet_nodes_file << i << " "
+                           << dirichlet_nodes(i) << "\n";
+    }
+
+
+  // ------------------------------------------------------------
+  // Neumann nodes
+  // ------------------------------------------------------------
+
+  for (auto i : this_cpu_set)
+    {
+      neumann_nodes_file << i << " "
+                        << neumann_nodes(i) << "\n";
+    }
+
+
+  // ------------------------------------------------------------
+  // Constraints
+  // ------------------------------------------------------------
+
+  for (auto i : this_cpu_set)
+    {
+      if (constraints.is_constrained(i))
+        {
+          const auto *entries =
+            constraints.get_constraint_entries(i);
+
+          constraints_file << i << " ";
+
+          if (entries != nullptr)
+            {
+              constraints_file << entries->size();
+
+              for (const auto &entry : *entries)
+                {
+                  constraints_file << " "
+                                   << entry.first << " "
+                                   << entry.second;
+                }
+            }
+          else
+            {
+              constraints_file << 0;
+            }
+
+          constraints_file << " "
+                            << constraints.get_inhomogeneity(i)
+                            << "\n";
+        }
+    }
+}
 
 
 template class BEMProblem<2>;

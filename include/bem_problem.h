@@ -200,6 +200,10 @@ public:
   /// hand side.
   void
   assemble_system();
+  
+  // temporary, saves the marices of the rhs on separate files for condition number analysis
+  void 
+  save_bem_data() const;
 
 
   /// The next three methods are

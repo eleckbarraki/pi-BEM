@@ -255,7 +255,7 @@ ComputationalDomain<dim>::read_domain()
   else
     Assert(false, ExcNotImplemented());
 
-  // GridTools::copy_material_to_manifold_id(tria);
+  //GridTools::copy_material_to_manifold_id(tria);
 
   if (input_grid_name == "../grids/coarse_sphere" ||
       input_grid_name == "../grids/coarse_sphere_double_nodes" ||
@@ -913,7 +913,7 @@ ComputationalDomain<dim>::refine_and_resize(const unsigned int refinement_level)
     //////////  
     // if you want to refine around a point
     // first do one pass of global refinement
-    //tria.refine_global(1);
+    tria.refine_global(1);
     
     // refine only bottom face of the box around (0,0,-1.003)
     const Point<dim> refinement_center(0, 0, -1);
